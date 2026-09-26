@@ -45,12 +45,24 @@ public static class IslandWin32 {
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(PT p);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool join);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after,
+    int x, int y, int cx, int cy, uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   [StructLayout(LayoutKind.Sequential)] public struct PT { public int X, Y; }
   const int GWL_EXSTYLE = -20, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
   const int WS_EX_TRANSPARENT = 0x20;
   const int SW_RESTORE = 9, SW_SHOW = 5, GA_ROOTOWNER = 2;
   const int OFFSCREEN = -30000;   // 托盘隐藏/甩出屏幕外的窗口都落在 -32000 一带
+  static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+  const uint SWP_NOMOVE = 0x2, SWP_NOSIZE = 0x1, SWP_NOACTIVATE = 0x10;
+
+  // WPF 的 Topmost=True 只在设置那一刻生效一次：别的程序也开 TopMost（游戏切无边框全屏、
+  // 某些工具窗）就会把岛压下去，而且岛自己不会有机会再抢回来。所以按固定节奏重申一次，
+  // 位置尺寸都不动、也不抢焦点。
+  public static bool ForceTopmost(IntPtr h) {
+    return SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  }
+
 
   // 岛屿常驻的「把手」压在屏幕最顶，正好盖住最大化窗口标题栏中间那块。不点透就是替别人
   // 吞掉标题栏点击，所以把手态必须 WS_EX_TRANSPARENT（WPF 的 AllowsTransparency 只管形状不管命中）。
@@ -63,6 +75,10 @@ public static class IslandWin32 {
   }
   public static int CursorX() { PT p; return GetCursorPos(out p) ? p.X : -32000; }
   public static int CursorY() { PT p; return GetCursorPos(out p) ? p.Y : -32000; }
+  // 左键现在是不是按着的。只能问 Win32：WPF 那侧 Mouse.PrimaryDevice 是 Win32MouseDevice，
+  // .NET Framework 没有公开的 GetMouseState()（实测 MethodNotFound），而拖拽每 tick 都要问一次。
+  [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vkey);
+  public static bool LeftDown() { return (GetAsyncKeyState(0x01) & unchecked((short)0x8000)) != 0; }
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint data, uint extra, IntPtr reserved);
   const uint MDOWN = 0x0002, MUP = 0x0004, RDOWN = 0x0008, RUP = 0x0010;

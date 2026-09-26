@@ -13,10 +13,18 @@
 //   {"cmd":"text","id":"9437","withSource":false}    -> {ok,id,text}   拿完整正文，不动剪贴板
 //   {"cmd":"copy","id":"9437"}                       -> {ok,id,chars,lines}  写进系统剪贴板
 //   {"cmd":"copy","text":"..."}                       -> 同上，直接复制给它的文本
+//   {"cmd":"config"}                                  -> {ok,path,island,weather,calendar}
+//   {"cmd":"config.set","island":{"scale":1.2}}        -> {ok,island}   只并 island 段，别的段一个字不动
+//   {"cmd":"request","action":"expand"}                -> {ok,action,at} 让岛做一次动作
 // 失败一律是 {ok:false,reason:"…"}，reason 是可读的中文，不是堆栈。
+//
+// config.set / request 都是「写文件、岛按 mtime 轮询到再应用」，不是把指令推给岛：
+// 岛本来就在盯这个文件，多开一条到岛的通道只会多一处会失败的 IO。
+// 值不在这里校验 —— 校验规则只有岛上的 $PrefsSpec 一份，抄到这里就会有两套说法。
+// 非法值岛会回落默认并在 island.out.log 写一行 [prefs]，config 读回来的是盘上真实那份。
 import net from 'node:net';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, statSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync, unlinkSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -64,6 +72,22 @@ export function setClipboard(text) {
   } finally {
     try { unlinkSync(f); } catch {}
   }
+}
+
+// 岛认的一次性动作。这一份和 island.ps1 里 Invoke-PrefsRequest 的 switch 必须逐字一致，
+// test/prefs-test.mjs 会对着两处源码比，漂了就红 —— 校验放在这里是为了给调用方一个当场回话，
+// 而不是把错动作甩给岛、只写进调用方看不见的 island.out.log。
+export const ISLAND_ACTIONS = ['expand', 'collapse', 'pause', 'resume', 'recenter', 'pill'];
+
+const configFile = data => join(data, 'config.json');
+
+// 先写 .tmp 再改名：岛是按 mtime 轮询这个文件的，读到半截 JSON 会整轮回落默认值，
+// 面板上就是一次看得见的闪。无 BOM 同 prefs.ps1 的规矩（node 侧 JSON.parse 认 BOM，PS 不认）。
+function writeConfig(data, cfg) {
+  const f = configFile(data), tmp = f + '.tmp';
+  writeFileSync(tmp, JSON.stringify(cfg, null, 2), 'utf8');
+  try { unlinkSync(f); } catch {}
+  renameSync(tmp, f);
 }
 
 function loadState(DATA) {
@@ -161,8 +185,42 @@ export function startApi({ data, log = () => {} }) {
         return { ok: true, id: String(id || ''), chars: text.length,
                  lines: text.split('\r\n').length };
       }
+      case 'config': {
+        // 还没有 config.json 不是错误 —— 那正是「全默认值」的状态，调用方拿到空段就行
+        const cfg = readJson(configFile(data)) || {};
+        return { ok: true, path: configFile(data), exists: existsSync(configFile(data)),
+                 island: cfg.island || {}, weather: cfg.weather || {}, calendar: cfg.calendar || {} };
+      }
+      case 'config.set': {
+        const patch = req.island;
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch))
+          return { ok: false, reason: 'config.set 要带 island 段：{"cmd":"config.set","island":{"scale":1.2}}' };
+        const keys = Object.keys(patch);
+        if (!keys.length) return { ok: false, reason: 'island 段是空的，没东西可写' };
+        if (keys.length > 32) return { ok: false, reason: `一次最多改 32 项，这次给了 ${keys.length} 项` };
+        for (const k of keys) {
+          if (!/^[a-z][a-z0-9]{0,31}$/i.test(k)) return { ok: false, reason: `配置项名不合法：${k}` };
+          if (k === 'request') return { ok: false, reason: 'request 是一次性指令，走 {"cmd":"request","action":"…"}' };
+          const v = patch[k];
+          if (v === null || typeof v === 'object') return { ok: false, reason: `配置项 ${k} 的值要是一个标量（数字/字符串/真假）` };
+        }
+        const cfg = readJson(configFile(data)) || {};
+        cfg.island = { ...(cfg.island || {}), ...patch };
+        try { writeConfig(data, cfg); } catch (e) { return { ok: false, reason: '写 config.json 失败：' + e.message }; }
+        return { ok: true, island: cfg.island, note: '值由岛上的 $PrefsSpec 校验，超出范围会被夹回并写进 island.out.log' };
+      }
+      case 'request': {
+        const a = String(req.action || '').toLowerCase();
+        if (!ISLAND_ACTIONS.includes(a))
+          return { ok: false, reason: `action 只认 ${ISLAND_ACTIONS.join('/')}，给的是「${req.action || '（空）'}」` };
+        const cfg = readJson(configFile(data)) || {};
+        const at = new Date().toISOString();
+        cfg.island = { ...(cfg.island || {}), request: { action: a, at } };
+        try { writeConfig(data, cfg); } catch (e) { return { ok: false, reason: '写 config.json 失败：' + e.message }; }
+        return { ok: true, action: a, at };
+      }
       default:
-        return { ok: false, reason: '命令不认识：ping / list / text / copy' };
+        return { ok: false, reason: '命令不认识：ping / list / text / copy / config / config.set / request' };
     }
   }
 }

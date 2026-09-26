@@ -12,6 +12,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
+const ROOT = fileURLToPath(new URL('../', import.meta.url));
+const TOOLS = join(ROOT, 'tools');
 const D = join(process.env.LOCALAPPDATA, 'win-island');
 const TMP = f => join(D, f);
 const KEEP = process.argv.includes('--keep');
@@ -21,7 +23,7 @@ const sh = (cmd, env) => execFileSync('powershell',
   { encoding: 'utf8', maxBuffer: 9e6, env: { ...process.env, ...env } });
 // PowerShell 控制台是 GBK，中文经管道会花掉；一律让脚本自己写 UTF-8 文件再读
 const outFile = (cmd, f, env) => { sh(`${cmd} | Out-File -Encoding utf8 '${f}'`, env); return readFileSync(f, 'utf8'); };
-const ps1 = (name, args = '', env) => outFile(`& '${join(HERE, name)}' ${args}`, TMP(name.replace('.ps1', '') + '-out.txt'), env);
+const ps1 = (name, args = '', env) => outFile(`& '${join(TOOLS, name)}' ${args}`, TMP(name.replace('.ps1', '') + '-out.txt'), env);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const say = s => console.log(s);
 
@@ -131,5 +133,5 @@ function rowIndexOf(rows, title) {
   }
   return -1;
 }
-if (!existsSync(join(HERE, 'ui-probe.ps1'))) { say('找不到 ui-probe.ps1，要在 D:\\win-island 下跑'); process.exit(1); }
+if (!existsSync(join(TOOLS, 'ui-probe.ps1'))) { say('找不到 tools/ui-probe.ps1，要在仓库目录下跑'); process.exit(1); }
 main().catch(e => { say('异常：' + e.message + '\n' + (e.stdout || '') + (e.stderr || '') + (e.output || '')); process.exit(1); });

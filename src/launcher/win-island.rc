@@ -1,0 +1,35 @@
+// win-island.exe 的资源段：图标 + 文件版本信息。
+// 这是模板：scripts/build.mjs 会把 @VERSION@ / @VERNUM@ 换成 package.json 里的版本再交给 windres。
+// 没有 rc.exe 也能编：GNU windres（mingw）认这份语法，csc 用 /win32res 收进来。
+#include <windows.h>
+
+IDI_MAIN ICON "icon.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @VERNUM@
+ PRODUCTVERSION @VERNUM@
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "080404b0"
+    BEGIN
+      VALUE "CompanyName",   "PaperTigerL"
+      VALUE "FileDescription", "win-island 通知原子岛启动器"
+      VALUE "FileVersion",   "@VERSION@"
+      VALUE "InternalName",  "win-island"
+      VALUE "LegalCopyright", "MIT License"
+      VALUE "OriginalFilename", "win-island.exe"
+      VALUE "ProductName",   "win-island"
+      VALUE "ProductVersion", "@VERSION@"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x804, 1200
+  END
+END

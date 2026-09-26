@@ -11,6 +11,8 @@
 #                                                    免得人手一动鼠标，面板就在两步之间收掉了
 #   powershell -File ui-probe.ps1 -CopyRow 0         端到端验复制：上滑展开 -> 真右键那一行 ->
 #                                                    在 UIA 里找到菜单项 -> 真点它 -> 回读剪贴板
+#   powershell -File ui-probe.ps1 -FsCycle           端到端验全屏换档：右键胶囊 -> 点「全屏时：…」
+#                                                    -> 回读 config.json（顺带验它没有 BOM）
 [CmdletBinding()]
 param(
   [int]$ClickRow = -1,
@@ -18,6 +20,7 @@ param(
   [switch]$ClickRead,
   [switch]$Away,
   [switch]$Dump,
+  [switch]$FsCycle,
   [string]$Shot = '',
   [int]$CopyRow = -1,
   [string]$CopyMatch = '',
@@ -28,7 +31,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
-. (Join-Path $PSScriptRoot 'activate-lib.ps1')
+. (Join-Path (Join-Path (Split-Path $PSScriptRoot -Parent) 'src/island') 'activate-lib.ps1')
 
 $D = Join-Path $env:LOCALAPPDATA 'win-island'
 $ipid = [int]((Get-Content (Join-Path $D 'island.pid') | Out-String).Trim())
@@ -70,6 +73,43 @@ $wr = $win.Current.BoundingRectangle
 function Find-Texts($el) {
   return $el.FindAll($TS::Descendants,
     (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Text)))
+}
+if ($FsCycle) {
+  # 换档这条要真点出来：发通知撑出胶囊 -> 右键 -> UIA 找到「全屏时：…」-> 真点 -> 回读磁盘上的 config.json。
+  # 只看日志不算数：写回 config.json 必须无 BOM，带 BOM 了 node 那边 JSON.parse 直接炸。
+  $before = (Get-Content (Join-Path $D 'config.json') -Raw)
+  & (Join-Path $PSScriptRoot 'send-test.ps1') -Title '全屏档菜单测试' -Body '右键换档' | Out-Host
+  Start-Sleep -Milliseconds 900
+  $w2 = $AE::RootElement.FindFirst($TS::Children, $cond)
+  $r = $w2.Current.BoundingRectangle
+  $cx = [int]($r.X + $r.Width / 2); $cy = [int]($r.Y + [Math]::Min(40, $r.Height / 2))
+  "[右键] 胶囊 $([int]$r.X),$([int]$r.Y) $([int]$r.Width)x$([int]$r.Height) -> $cx,$cy " + [IslandWin32]::RightClickAt($cx, $cy)
+  Start-Sleep -Milliseconds 500
+  $m = $null
+  $all = $AE::RootElement.FindAll($TS::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::MenuItem)))
+  for ($i = 0; $i -lt $all.Count; $i++) {
+    if ($all.Item($i).Current.Name -like '全屏时：*') { $m = $all.Item($i); break }
+  }
+  if (-not $m) { "UIA 里没找到「全屏时：…」菜单项（当场 MenuItem 共 $($all.Count) 个）= 菜单没弹出"; exit 1 }
+  $mr = $m.Current.BoundingRectangle
+  "[菜单] 「$($m.Current.Name)」在 $([int]$mr.X),$([int]$mr.Y)"
+  [void][IslandWin32]::ClickAt([int]($mr.X + $mr.Width / 2), [int]($mr.Y + $mr.Height / 2))
+  Start-Sleep -Milliseconds 600
+  $bytes = [System.IO.File]::ReadAllBytes((Join-Path $D 'config.json'))
+  $bom = if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { '有 BOM（node 会炸）' } else { '无 BOM' }
+  $after = (Get-Content (Join-Path $D 'config.json') -Raw)
+  "config.json：$bom / $($bytes.Length) 字节"
+  "  换档前: " + (($before  | ConvertFrom-Json).island.fullscreen)
+  "  换档后: " + (($after  | ConvertFrom-Json).island.fullscreen)
+  # 别的段不能被这次写回弄丢（weather/calendar 是抓取层在读的）
+  $lost = @()
+  foreach ($k in (@((($before | ConvertFrom-Json).PSObject.Properties.Name)))) {
+    if (-not (($after | ConvertFrom-Json).PSObject.Properties.Name) -contains $k) { $lost += $k }
+  }
+  if ($lost.Count) { "换档把这几段写丢了：$($lost -join ',')"; exit 1 }
+  "其余段还在：$((($after | ConvertFrom-Json).PSObject.Properties.Name) -join ',')"
+  exit 0
 }
 if ($ClickRead) {
   $t = Find-Texts $win

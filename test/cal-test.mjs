@@ -8,10 +8,10 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { parseAny, decodeBytes } from './calparse.mjs';
+import { parseAny, decodeBytes } from '../src/schedule/calparse.mjs';
 // expandOccurrences 是这一层该有但还没写的东西：用命名空间导入才不至于在 import 阶段就炸，
 // 让它作为「整块缺失」被记成一条失败断言，而不是让整份测试跑不起来。
-import * as CP from './calparse.mjs';
+import * as CP from '../src/schedule/calparse.mjs';
 const expandOccurrences = typeof CP.expandOccurrences === 'function' ? CP.expandOccurrences : null;
 
 // 参数：[--expect N] [只跑某一类]

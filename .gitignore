@@ -13,31 +13,30 @@ last-copy.txt
 *.pid
 config.json
 
-# 个人真数据：示例课表可以留，你导出来的那份不行
+# 个人真数据：示例课表可以留，你自己导出来的那份不行
 timetable*.ics
 
-# 调试 dump / 备份 / 打包产物
+# 私有草稿 / 调试工具 / 打包产物：里面全是真名字、真路径，永不发布
+scratch/
 dist/
+build/
+scripts/precheck-private.json
+scripts/pack-release.mjs
+tools/repost-real.mjs
+tools/mtp-diag.ps1
+tools/mtp-scan.ps1
+tools/probe-identity.mjs
+tools/probe-payload.mjs
+tools/dbq.mjs
+
+# 调试 dump
 *.bak
 *.out
-act*.txt
-click*.txt
-launchout*.txt
-snapout*.txt
-mtp*.txt
-isl*.txt
+*.txt.tmp
 procs.txt
 pstore.txt
 rawwin.txt
-repost*.txt
 regress.txt
 dryrun.txt
 dump.txt
-lint*.txt
-clip-now.txt
-cp*.txt
-dbg.txt
-wx.txt
-s.txt
-st.txt
-c3.txt
+lint.txt

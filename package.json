@@ -1,0 +1,21 @@
+{
+  "name": "win-island",
+  "version": "1.0.0",
+  "private": false,
+  "description": "把 Windows 所有软件的通知收进屏幕顶部一枚胶囊（Node 抓取层 + WPF 渲染层 + 编译出的启动器，零安装）",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "win-island": "bin/win-island.exe" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/launch.ps1",
+    "stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop.ps1",
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/test-all.mjs",
+    "lint": "node scripts/bom.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/lint.ps1",
+    "release": "node scripts/build.mjs --release"
+  },
+  "repository": { "type": "git", "url": "git+https://github.com/PaperTigerL/win-island.git" },
+  "keywords": ["windows", "notification", "dynamic-island", "wpf", "toast", "calendar"],
+  "files": ["src", "scripts", "tools", "test", "docs", "assets", "bin", "README.md", "CHANGELOG.md", "LICENSE"]
+}

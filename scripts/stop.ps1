@@ -15,4 +15,20 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyCon
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
   Where-Object { $_.CommandLine -like '*island.ps1*' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "已停岛屿 pid=$($_.ProcessId)" }
+# 再清 launch.ps1 留下的 cmd 日志包装和它的子进程。包装握着 *.out.log 的写句柄，
+# 漏掉它的话下一次 launch 的 cmd 打不开日志会「静默什么都不起」；子进程（老版本留下的空跑
+# REPL）命令行里往往啥都没有，只按上面的关键字匹配抓不到，所以顺着父 pid 一起端。
+# 只认命令行里出现我们自己那两个日志文件名的 cmd，别拿 '*win-island*' 这种宽匹配去误杀用户的 shell。
+$wrap = @(Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -match 'win-island\\(capture|island)\.out\.log' })
+if ($wrap) {
+  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  foreach ($w in $wrap) {
+    foreach ($k in ($all | Where-Object { $_.ParentProcessId -eq $w.ProcessId })) {
+      Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Stop-Process -Id $w.ProcessId -Force -ErrorAction SilentlyContinue
+    "已停日志包装 pid=$($w.ProcessId)"
+  }
+}
 '已停止'

@@ -10,10 +10,10 @@ const { join } = await import('node:path');
 const HOME = process.env.WIN_ISLAND_HOME;
 mkdirSync(HOME, { recursive: true });
 
-const { parseAll, collect } = await import('./cal-import.mjs');
-const { view } = await import('./calview.mjs');
-const { importBatch, listRows, sourcesList, itemsFor, stats, setExcluded, dropSource, closeDb } = await import('./calstore.mjs');
-const { buildAgenda, fetchAgenda } = await import('./meta.mjs');
+const { parseAll, collect } = await import('../src/schedule/cal-import.mjs');
+const { view } = await import('../src/schedule/calview.mjs');
+const { importBatch, listRows, sourcesList, itemsFor, stats, setExcluded, dropSource, closeDb } = await import('../src/schedule/calstore.mjs');
+const { buildAgenda, fetchAgenda } = await import('../src/schedule/meta.mjs');
 
 let n = 0, bad = 0; const fails = [];
 function eq(label, want, got) {
@@ -134,7 +134,7 @@ eq('落盘的 JSON 可解析且条数一致', af.n, JSON.parse(readFileSync(join
 
 // ---------------------------------------------------------------- 6) 预览页：真的 GET + POST
 console.log('\n== 6) 预览页');
-const { serve } = await import('./cal-preview.mjs');
+const { serve } = await import('../src/schedule/cal-preview.mjs');
 const P = 8799;
 const batches2 = parseAll([{ path: fIcs, name: '页面导入.ics' }], {});
 serve(batches2, { port: P });

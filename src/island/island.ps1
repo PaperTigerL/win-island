@@ -1,15 +1,22 @@
-﻿# 原子岛渲染层：屏幕顶部居中的一块「岛」，四个显示态（同一个窗口换内容，不换窗口）：
-#   clock   常驻小条：时钟 + 星期日期 + 天气 + 未读数。必须点击穿透
-#           （Set-ClickThrough），否则它正盖在最大化窗口标题栏中间，会吞掉别人的标题栏点击。
-#   handle  前台窗口最大化时自动退回的 6px 把手（给小条让位），有未读时变亮。
-#   pill    来通知时弹出的胶囊，左键 = 跳来源应用。
-#   panel   光标顶到屏幕最上边（或点托盘图标）展开：时钟/天气 + 今日安排 + 未读列表。
-# 天气和日程不在这里拉：见 meta.mjs，渲染层只读它写出的 weather.json / agenda.json。
+﻿# 原子岛渲染层：一块常驻悬浮的「岛」，同一个窗口换内容不换窗口，四个显示态：
+#   clock   常驻小条：时钟 + 星期日期 + 天气 + 未读数
+#   handle  6px 把手（showClock=false 或 fullscreen=handle 时的常驻态），有未读时变亮
+#   pill    来通知时弹出的胶囊，左键 = 跳来源应用
+#   panel   展开态：时钟/天气 + 今日安排 + 未读列表（触发方式见 trigger）
+#
+# 这个文件里不写死任何交互参数。触发方式、位置与偏移、停留时长与延迟、动画、
+# 什么条件下显示/隐藏，全部是 config.json 里 `island.*` 的配置项：
+#   取值/类型/范围/枚举/默认值 -> src/island/prefs.ps1（唯一的 spec）
+#   摆在哪、多大、跨屏换算     -> src/island/geometry.ps1
+#   本文件只负责「读到一个值 -> 做一次事」，改行为不用改这里（清单见 docs/CONFIG.md）
+# 配置热生效：主循环每秒比对一次 config.json 的 mtime，只应用真正变了的那几项。
+#
+# 天气和日程不在这里拉：见 src/schedule/meta.mjs，渲染层只读它写出的 weather.json / agenda.json。
 # 为什么 PowerShell + WPF 而不是 Electron/Tauri：这台机器 dotnet 是坏 shim、没装 rust，
 # 而 WPF 是系统自带的 —— 零安装就能拿到无边框、圆角、半透明、置顶和动画。
 # 注意：本文件必须存成「UTF-8 带 BOM」，否则 PowerShell 5.1 会按 GBK 读，中文字符串会炸解析器。
 # 用法： powershell -NoProfile -ExecutionPolicy Bypass -File island.ps1
-#       powershell ... -File island.ps1 -HoldMs 9000 -HotPx 3 -NoClock
+#       powershell ... -File island.ps1 -HoldMs 9000 -Wide 520        # 命令行只覆盖显式传的那几项
 # 退出：托盘图标右键 -> 退出，或右键胶囊 -> 退出岛屿
 [CmdletBinding()]
 param(
@@ -29,6 +36,8 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 # 「按 AUMID 找回已经开着的那个窗口」的 Win32 逻辑和命令行版共用一份实现
 . (Join-Path $PSScriptRoot 'activate-lib.ps1')
+. (Join-Path $PSScriptRoot 'prefs.ps1')
+. (Join-Path $PSScriptRoot 'geometry.ps1')
 
 if (-not $Queue) { $Queue = Join-Path $env:LOCALAPPDATA 'win-island\queue.jsonl' }
 $script:Queue = $Queue
@@ -41,11 +50,21 @@ $script:AgendaFile  = Join-Path $script:DataDir 'agenda.json'
 # 整周课表是抓取层另写的一份（week.json）：agenda.json 是三天窗口，装不下一周七天的课
 $script:WeekFile    = Join-Path $script:DataDir 'week.json'
 $script:ConfigFile  = Join-Path $script:DataDir 'config.json'
-$script:MetaScript  = Join-Path $PSScriptRoot 'meta.mjs'
-$script:HoldMs = $HoldMs
-$script:Wide = $Wide
+# meta.mjs 在隔壁模块目录：右键菜单里「刷新天气/日程」要拿它起一次性进程
+$script:MetaScript  = Join-Path (Split-Path (Split-Path $PSScriptRoot)) 'src\schedule\meta.mjs'
+# launch.ps1 解析过一次 node（可移植包带 bin\node.exe）并写进环境变量，这里跟着它走；
+# 手工直接跑 island.ps1 时这个变量是空的，就用 PATH 上的 node。
+function Get-NodeExe { if ($env:WIN_ISLAND_NODE) { $env:WIN_ISLAND_NODE } else { 'node' } }
+
+# 生效配置：默认值 <- config.json 的 island 段 <- 命令行显式传的这几项。
+# 全岛只认这一份 $script:P，不再各自拿参数变量，所以「改了配置没生效」只可能是这里漏了应用。$script:P = Get-PrefsDefault
+$script:PSig = ''
+$script:ReqAt = ''
 $script:Paused = $false
 $script:Mode = 'handle'
+$script:StackUp = $false    # root 子元素当前是哪种顺序，见 Set-StackUp（XAML 声明序 = 面板往下长）
+$script:Thru = $false       # 窗口当前是不是穿透态，只有翻转时才动 exstyle
+$script:MenuUp = $false     # 菜单/托盘是不是开着，开着时让出置顶带（见 Sync-Topmost）
 $script:Shown = $false
 $script:Until = [datetime]::MinValue
 $script:FadeAt = [datetime]::MinValue
@@ -65,7 +84,14 @@ $script:WeekMtime = [datetime]::MinValue
 $script:SchedMode = 'today'
 $script:ClkCache = ''
 $script:hwnd = [IntPtr]::Zero
-$script:WA = [System.Windows.SystemParameters]::WorkArea
+# 小条上的按压状态：拖拽 / 点击 / 长按三件事共用一次按下，靠位移量和按住时长分流
+$script:PressAt = $null
+$script:PressX = 0
+$script:PressY = 0
+$script:DragOff = $null
+$script:Dragged = $false
+$script:LongFired = $false
+$script:HoverAt = $null          # hover 档的计时起点，trigger 不是 hover 时一直为 null
 if (-not (Test-Path $script:DataDir)) { New-Item -ItemType Directory -Path $script:DataDir -Force | Out-Null }
 Set-Content -Path (Join-Path $script:DataDir 'island.pid') -Value $PID -Encoding ASCII
 
@@ -76,12 +102,35 @@ $script:Dismissed = @{}
 $script:Gone = @{}
 $script:Totals = @{ opened = 0; dismissed = 0; gone = 0 }
 
+# ---------- 配置装载（必须在拼 XAML 之前：宽度和间距要插进模板里） ----------
+# $PSBoundParameters 只能在脚本作用域取，进了函数就变成函数自己的参数表，所以先收进来
+$script:CliOver = @{}
+if ($PSBoundParameters.ContainsKey('HoldMs')) { $script:CliOver.holdMs = $HoldMs }
+if ($PSBoundParameters.ContainsKey('TopPx'))  { $script:CliOver.topGap = $TopPx }
+if ($PSBoundParameters.ContainsKey('Wide'))   { $script:CliOver.wide = $Wide }
+if ($PSBoundParameters.ContainsKey('PollMs')) { $script:CliOver.pollMs = $PollMs }
+if ($PSBoundParameters.ContainsKey('HotPx'))  { $script:CliOver.hotPx = $HotPx }
+if ($NoClock) { $script:CliOver.showClock = $false }
+
+function Load-Prefs {
+  $script:P = Read-Prefs $script:ConfigFile $script:CliOver
+  # 非法值不拦启动，但必须说清楚被校正成了什么，否则用户只会觉得「我明明改了」
+  foreach ($msg in @($script:PrefsIssues)) { "[prefs] $msg" | Write-Host }
+  $script:PrefsIssues = @()
+  $script:PSig = Get-PrefsSignature $script:P
+  if (Test-Path $script:ConfigFile) { $script:PrefsMtime = (Get-Item $script:ConfigFile).LastWriteTime }
+}
+Load-Prefs
+
+# 缩放后的外框宽度：所有「岛有多宽」的判断都走这里，不再直接读 wide
+function Get-FootW { return [double]$script:P.wide * [double]$script:P.scale }
+
 $Xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True"
         Background="Transparent" Topmost="True" ShowInTaskbar="False"
-        SizeToContent="Height" Width="$Wide" Title="win-island"
+        SizeToContent="Height" Width="$([int](Get-FootW))" Title="win-island"
         FontFamily="Segoe UI Variable Text, Microsoft YaHei UI, Segoe UI"
         TextOptions.TextFormattingMode="Ideal" UseLayoutRounding="True">
   <Window.Resources>
@@ -262,14 +311,19 @@ $Xaml = @"
       </Setter>
     </Style>
   </Window.Resources>
-  <StackPanel>
+  <!-- 整体缩放放在根 StackPanel 的 LayoutTransform 上：一处改，小条/胶囊/面板连同字号留白一起缩放，
+       不用给每个尺寸乘一遍系数（那种写法迟早漏掉一处）。窗口宽度由 Place-Island 同步成 wide*scale。
+       这里子元素的声明顺序就是「面板往下长」；底部锚位要反过来，靠 Set-StackUp 重排。 -->
+  <StackPanel x:Name="root">
+    <StackPanel.LayoutTransform>
+      <ScaleTransform x:Name="uiScale" ScaleX="1" ScaleY="1"/>
+    </StackPanel.LayoutTransform>
 
     <Border x:Name="handle" Width="150" Height="6" CornerRadius="0,0,7,7"
             HorizontalAlignment="Center" Background="#40FFFFFF"/>
 
-    <!-- 常驻小条：时钟 + 天气 + 未读。它替代了原来那条光会亮一下的 6px 把手，
-         因为「这块能上滑」这件事得有个理由，一个有用的信息比一个色块好认。
-         前台窗口最大化时自动退回 6px 把手（Show-Idle 里判），不然会盖住别人的标题栏。 -->
+    <!-- 常驻小条：时钟 + 星期日期 + 天气 + 未读角标。天气段和角标各是一个配置项
+         （showWeather / showUnread），要收起来的是「分隔线 + 天气」这一对，所以两条都起了名字。 -->
     <Border x:Name="clock" CornerRadius="0,0,15,15" Padding="13,3,13,5" Visibility="Collapsed"
             HorizontalAlignment="Center" Background="#E314161D"
             BorderBrush="#28FFFFFF" BorderThickness="1,0,1,1">
@@ -278,7 +332,7 @@ $Xaml = @"
                    FontWeight="SemiBold" VerticalAlignment="Center"/>
         <TextBlock x:Name="clkDate" Text="" Margin="7,0,0,0" FontSize="11" VerticalAlignment="Center"
                    Foreground="#FF8A94A2"/>
-        <Border Width="1" Margin="10,4,10,4" Background="#26FFFFFF"/>
+        <Border x:Name="clkWxSep" Width="1" Margin="10,4,10,4" Background="#26FFFFFF"/>
         <TextBlock x:Name="clkWx" Text="" FontSize="12" VerticalAlignment="Center"
                    Foreground="#FFB7C2D1"/>
         <Border x:Name="clkUnreadBox" CornerRadius="9" Padding="7,1,7,2" Margin="10,0,0,0"
@@ -288,7 +342,7 @@ $Xaml = @"
       </StackPanel>
     </Border>
 
-    <Border x:Name="pill" Style="{StaticResource card}" Margin="0,$TopPx,0,0"
+    <Border x:Name="pill" Style="{StaticResource card}" Margin="0,$($script:P.topGap),0,0"
             CornerRadius="18" Padding="0" Opacity="0" Visibility="Collapsed">
       <Border.RenderTransform>
         <TranslateTransform x:Name="pillDy" Y="-8"/>
@@ -318,7 +372,7 @@ $Xaml = @"
       </Grid>
     </Border>
 
-    <Border x:Name="panel" Style="{StaticResource card}" Margin="0,$TopPx,0,0"
+    <Border x:Name="panel" Style="{StaticResource card}" Margin="0,$($script:P.topGap),0,0"
             CornerRadius="20" Padding="10,10,10,8" Opacity="0" Visibility="Collapsed">
       <Border.RenderTransform>
         <TranslateTransform x:Name="panelDy" Y="-10"/>
@@ -478,11 +532,17 @@ $Xaml = @"
 "@
 
 $script:win     = [Windows.Markup.XamlReader]::Parse($Xaml)
+# 解析失败时 PowerShell 只是记一条错误继续往下跑，结果是一个「进程活着但什么都没有」的僵尸岛
+# （实测：XAML 里写了 Direction 之后，启动日志照样打全，屏幕上什么都没有）。这里必须硬退。
+if (-not $script:win) { '[island] XAML 解析失败，退出（详情见 island.err.log）' | Write-Host; exit 1 }
+$script:root    = $win.FindName('root')
+$script:uiScale = $win.FindName('uiScale')
 $script:handle  = $win.FindName('handle')
 $script:clock   = $win.FindName('clock')
 $script:clkTime = $win.FindName('clkTime')
 $script:clkDate = $win.FindName('clkDate')
 $script:clkWx   = $win.FindName('clkWx')
+$script:clkWxSep = $win.FindName('clkWxSep')
 $script:clkUnreadBox = $win.FindName('clkUnreadBox')
 $script:clkUnread    = $win.FindName('clkUnread')
 $script:pTime   = $win.FindName('pTime')
@@ -562,33 +622,145 @@ function Animate($target, $prop, $to, $ms) {
   $target.BeginAnimation($prop, $a)
 }
 
-function Move-To-Top {
-  $script:win.Width = $script:Wide
-  $script:win.Left = $script:WA.X + ($script:WA.Width - $script:Wide) / 2
-  $script:win.Top  = $script:WA.Y
+# ---------- 几何：摆在哪、多大（所有取值都来自 $script:P，见 prefs.ps1） ----------
+# 锚位和拖拽保存的坐标描述的都是「小条」而不是「窗口」：面板一展开窗口高度会从 ~30 变成几百，
+# 拿窗口当基准的话，每次展开小条都会跳一下。
+function Get-BarH {
+  $b = if ($script:Mode -eq 'handle') { $script:handle.ActualHeight } else { $script:clock.ActualHeight }
+  if ($b -le 1) { $b = 30 * [double]$script:P.scale }     # 第一次布局前量不到，给个保守值
+  return [double]$b
+}
+function Get-IslandH {
+  $h = [double]$script:win.ActualHeight
+  if ($h -le 1) { $h = Get-BarH }
+  return $h
 }
 
-# 三个态共用一个 HWND：把手态必须点透，胶囊/面板态必须能吃点击，所以每次切态改一次 exstyle
+# 面板往上长还是往下长。.NET Framework 的 StackPanel 没有公开的 Direction（反射查过，
+# 只有 .NET Core 的 WPF 有），所以「往上长」靠换子元素顺序：小条排在最后一个，它就贴在窗口下沿。
+# 顺序变了等于重新挂一遍视觉树，所以只在真的翻转时才动手，用 $script:StackUp 记住当前态。
+function Set-StackUp($up) {
+  $up = [bool]$up
+  if ($script:StackUp -eq $up) { return }
+  $order = if ($up) { @($script:panel, $script:pill, $script:clock, $script:handle) }
+           else { @($script:handle, $script:clock, $script:pill, $script:panel) }
+  $script:root.Children.Clear()
+  foreach ($c in $order) { $script:root.Children.Add($c) }
+  $script:StackUp = $up
+}
+
+function Place-Island {
+  if (-not $script:win) { return }
+  $p = $script:P
+  $w = Get-FootW
+  $h = Get-IslandH
+  $bar = Get-BarH
+  $rects = Get-DipWorkAreas
+  $wa = Get-AnchorWorkArea $rects ([double]$script:win.Left + $w / 2) ([double]$script:win.Top + $bar / 2) `
+                            ($p.monitor -eq 'primary')
+  $a = [string]$p.anchor
+  if ($a -eq 'free' -and [int]$p.x -ge 0 -and [int]$p.y -ge 0) {
+    $c = Limit-OnScreen $rects ([double]$p.x) ([double]$p.y) $w $bar
+    $barX = $c.X; $barY = $c.Y
+  } else {
+    $bx = switch -regex ($a) {
+      'left$'  { [double]$wa.X }
+      'right$' { [double]$wa.X + $wa.W - $w }
+      default  { [double]$wa.X + ($wa.W - $w) / 2 }
+    }
+    $by = switch -regex ($a) {
+      '^top-'    { [double]$wa.Y }
+      '^bottom-' { [double]$wa.Y + $wa.H - $bar }
+      default    { [double]$wa.Y + ($wa.H - $bar) / 2 }
+    }
+    $barX = $bx + [double]$p.offset
+    $barY = $by + [double]$p.offsetY
+  }
+  # 面板往哪边长：下面放不下就整块往上长（底部锚位天然如此）
+  $up = ($a -like 'bottom-*') -or (($barY + $h) -gt ([double]$wa.Y + $wa.H + 1))
+  $winY = if ($up) { $barY + $bar - $h } else { $barY }
+  if (-not (Test-OnAnyScreen $rects $barX $winY $w $h)) {
+    # 显示器被拔掉 / 分辨率改小，保存的位置已经不在任何屏上：回落顶部居中，别把岛弄丢
+    $wa = Get-PrimaryWorkArea
+    "[island] 位置 $([int]$barX),$([int]$winY) $([int]$w)x$([int]$h) 不在任何屏上，回落顶部居中" | Write-Host
+    $barX = [double]$wa.X + ($wa.W - $w) / 2
+    $barY = [double]$wa.Y
+    $winY = $barY
+    $up = $false
+  }
+  # 面板往上长还是往下长：.NET Framework 的 StackPanel 没有公开的 Direction（.NET Core 才有），
+  # 所以「往上长」靠换子元素顺序实现 —— 小条排最后一个时它就在窗口下沿。
+  Set-StackUp $up
+  $script:clock.CornerRadius = if ($up) { '15,15,0,0' } else { '0,0,15,15' }
+  $script:handle.CornerRadius = if ($up) { '7,7,0,0' } else { '0,0,7,7' }
+  if ([Math]::Abs([double]$script:win.Width - $w) -gt 0.5) { $script:win.Width = $w }
+  if ([Math]::Abs([double]$script:win.Left - $barX) -gt 0.5) { $script:win.Left = $barX }
+  if ([Math]::Abs([double]$script:win.Top - $winY) -gt 0.5) { $script:win.Top = $winY }
+}
+
+# 穿透开关：常驻态要不要吃点击。开着穿透就拖不动也点不到小条 —— 这是配置项 clickThrough 的代价，
+# 想要点击/长按触发，prefs.ps1 的 Apply-PrefImplications 会自动把它关掉。
 function Set-ClickThrough($on) {
   if ($script:hwnd -eq [IntPtr]::Zero) { return }
   [void][IslandWin32]::SetClickThrough($script:hwnd, [bool]$on)
 }
 
+# clickThrough 的真实语义是「光标不在岛上时穿透」：光标都已经压在条上了，这一下就是冲岛来的，
+# 该收点击 —— 否则默认档（hover + 穿透）下拖不动也滚不动，「不吃标题栏点击」和「可拖拽缩放」
+# 就永远只能二选一。拖拽途中不翻转：鼠标已捕获给 WPF 了，中途改 exstyle 只会把这次拖拽搞丢。
+function Sync-ClickThrough {
+  if ($script:PressAt) { return }
+  $idle = ($script:Mode -eq 'handle' -or $script:Mode -eq 'clock' -or $script:Mode -eq 'hidden')
+  $thru = [bool]$script:P.clickThrough -and $idle -and -not (Test-OverBar)
+  if ($thru -eq $script:Thru) { return }
+  $script:Thru = $thru
+  Set-ClickThrough $thru
+}
+
+# 菜单/托盘弹出来时岛要让出置顶带：岛屿每 ~2s 抢一次置顶（autoTopmost），抢的结果就是把自己
+# 的右键菜单压到窗口下面 —— 上面几项看不见更点不到，等于配置改不了（2026-09-26 实测）。
+# 状态每 tick 现算而不是用计数器：漏收一次 Closed 就把置顶永久丢了，那比这个 bug 更难查。
+function Test-MenuUp {
+  if ($script:ctx -and $script:ctx.IsOpen) { return $true }
+  if ($script:rowMenu -and $script:rowMenu.IsOpen) { return $true }
+  if ($script:trayMenu -and $script:trayMenu.Visible) { return $true }
+  return $false
+}
+
+# 只在「有没有菜单开着」翻转时动一次 Topmost：每 tick 改属性会让窗口反复进出置顶带，肉眼可见地闪
+function Sync-Topmost {
+  $up = Test-MenuUp
+  if ($up -eq $script:MenuUp) { return }
+  $script:MenuUp = $up
+  $script:win.Topmost = (-not $up)
+  if (-not $up -and $script:hwnd -ne [IntPtr]::Zero) {
+    [void][IslandWin32]::ForceTopmost($script:hwnd)   # 收回置顶时立刻归位，别等下一次重申
+  }
+}
+
 function Set-Mode($m) {
   $script:Mode = $m
+  # 常驻小条在胶囊/面板展开时也不撤：岛是「长」出内容，不是换掉内容（showClock=false 才退回把手）
+  $showBar = [bool]$script:P.showClock -and ($m -eq 'clock' -or $m -eq 'pill' -or $m -eq 'panel')
   $script:handle.Visibility = if ($m -eq 'handle') { 'Visible' } else { 'Collapsed' }
-  $script:clock.Visibility  = if ($m -eq 'clock')  { 'Visible' } else { 'Collapsed' }
+  $script:clock.Visibility  = if ($showBar) { 'Visible' } else { 'Collapsed' }
   $script:pill.Visibility   = if ($m -eq 'pill')   { 'Visible' } else { 'Collapsed' }
   $script:panel.Visibility  = if ($m -eq 'panel')  { 'Visible' } else { 'Collapsed' }
-  # 常驻态（把手/时钟条）点透，胶囊/面板态要吃点击
-  Set-ClickThrough ($m -eq 'handle' -or $m -eq 'clock')
+  # 常驻态（把手 / 时钟条 / 整条隐藏）按配置决定点透，胶囊和面板一定要吃点击
+  Sync-ClickThrough
   if (-not $script:Shown) { $script:Shown = $true; $script:win.Show() }
+  Place-Island          # 高度变了，锚位要重算（底部/中间锚位全靠这一步才不跳）
 }
 
 function Update-Handle {
   $n = @(Get-Unread).Count
   # 有未读的时候把手亮一点：不点进去也得让人知道这块能上滑
   $script:handle.Background = Brush-Of $(if ($n -gt 0) { '#B37FB0FF' } else { '#40FFFFFF' })
+}
+
+# 是不是「常驻态」：只有这三种态下才由配置决定长什么样，胶囊/面板/淡出是临时态
+function Test-IdleShown {
+  return ($script:Mode -eq 'handle' -or $script:Mode -eq 'clock' -or $script:Mode -eq 'hidden')
 }
 
 # 前台窗口铺满整个工作区时，常驻小条会盖住人家的标题栏中间，这时退回 6px 把手
@@ -649,61 +821,218 @@ function Format-Wx($w, $long) {
 $script:Week = '周日', '周一', '周二', '周三', '周四', '周五', '周六'
 
 function Update-Clock {
+  $p = $script:P
   $now = Get-Date
   $hm = $now.ToString('HH:mm')
   $date = "$($script:Week[[int]$now.DayOfWeek]) $($now.Month)/$($now.Day)"
   $n = @(Get-Unread).Count
   $script:clkTime.Text = $hm
   $script:clkDate.Text = $date
+  $wx = if ($p.showWeather) { 'Visible' } else { 'Collapsed' }
+  $script:clkWxSep.Visibility = $wx
+  $script:clkWx.Visibility = $wx
   $script:clkWx.Text = Format-Wx $script:Weather $false
-  $script:clkUnreadBox.Visibility = if ($n -gt 0) { 'Visible' } else { 'Collapsed' }
+  $script:clkUnreadBox.Visibility = if ($p.showUnread -and $n -gt 0) { 'Visible' } else { 'Collapsed' }
   $script:clkUnread.Text = "未读 $n"
   $script:pTime.Text = $hm
   $script:pDate.Text = $date
   $script:pWx.Text = Format-Wx $script:Weather $true
+  $script:pWx.Visibility = $wx
+}
+
+# ---------- 显示条件：常驻态该长什么样 ----------
+function Get-IdleMode {
+  $p = $script:P
+  $fs = Test-ForegroundMaximized
+  if ($fs -and $p.fullscreen -eq 'hide') { return 'hidden' }
+  if (-not $p.showClock) { return 'handle' }
+  if ($fs -and $p.fullscreen -eq 'handle') { return 'handle' }
+  return 'clock'
 }
 
 function Show-Idle {
-  if ($NoClock -or (Test-ForegroundMaximized)) { Show-Handle } else { Set-Mode 'clock'; Update-Clock }
+  $m = Get-IdleMode
+  if ($m -eq 'handle') { Show-Handle; return }
+  if ($m -eq 'hidden') { Set-Mode 'hidden'; return }
+  Set-Mode 'clock'; Update-Clock
+}
+
+# ---------- 配置热加载：每秒比一次 mtime，只应用真正变了的项 ----------
+$script:PrefsGeo = 'anchor', 'x', 'y', 'offset', 'offsetY', 'wide', 'monitor', 'topGap', 'scale'
+$script:PrefsVis = 'fullscreen', 'showClock', 'pillOn', 'showWeather', 'showUnread'
+
+function Update-Prefs {
+  try {
+    if (-not (Test-Path $script:ConfigFile)) { return }
+    $t = (Get-Item $script:ConfigFile).LastWriteTime
+    if ($t -eq $script:PrefsMtime) { return }
+    $script:PrefsMtime = $t
+    $old = $script:P
+    Load-Prefs
+    $diff = @(Get-PrefsDiff $old $script:P)
+    if ($diff.Count -gt 0) { Apply-Prefs $diff }
+    Invoke-PrefsRequest
+  } catch { "[island] 配置这一轮没读成，继续按上一轮的值跑：$($_.Exception.Message)" | Write-Host }
+}
+
+function Apply-Prefs($diff) {
+  $p = $script:P
+  foreach ($k in $diff) {
+    # switch 的 case 不能写成 'a', 'b' { … }（解析器直接报错），所以这两项各占一行
+    switch ($k) {
+      'scale' { $script:uiScale.ScaleX = [double]$p.scale; $script:uiScale.ScaleY = [double]$p.scale }
+      'pollMs' { $script:timer.Interval = [TimeSpan]::FromMilliseconds([int]$p.pollMs) }
+      'clickThrough' { $script:Thru = $null; Sync-ClickThrough }
+      'showWeather' { Update-Clock }
+      'showUnread' { Update-Clock }
+      'trigger' { $script:HoverAt = $null }
+    }
+  }
+  if (@($diff | Where-Object { $script:PrefsGeo -contains $_ }).Count -gt 0) { Place-Island }
+  if (@($diff | Where-Object { $script:PrefsVis -contains $_ }).Count -gt 0 -and (Test-IdleShown)) { Show-Idle }
+  Sync-MenuLabels
+  "[prefs] 热应用 $($diff -join ' ')" | Write-Host
+}
+
+# 一次性指令通道：外部程序往 config.json 的 island.request 里塞 {action,at}，岛消费后按 at 去重。
+# 走文件而不是新开端口的原因：岛本来就在按 mtime 轮询这个文件，多一个通道就多一处会失败的 IO。
+function Invoke-PrefsRequest {
+  try {
+    $cfg = (Get-Content $script:ConfigFile -Raw -Encoding UTF8) | ConvertFrom-Json
+    if (-not $cfg.island -or -not $cfg.island.request) { return }
+    $rq = $cfg.island.request
+    $at = [string]$rq.at
+    if (-not $at -or $at -eq $script:ReqAt) { return }      # 同一条指令只认一次
+    $script:ReqAt = $at
+    $a = [string]$rq.action
+    $known = @('expand', 'collapse', 'pause', 'resume', 'recenter', 'pill') -contains $a
+    # 消费必须留一行日志：外部程序只能拿到「文件写进去了」，岛有没有真的做这件事，
+    # 判据在这行里（test/api-test.mjs 就是拿它当端到端凭据的）
+    "[prefs] request $a @$at " + $(if ($known) { '已执行' } else { "不认识（expand/collapse/pause/resume/recenter/pill）" }) | Write-Host
+    if (-not $known) { return }
+    switch ($a) {
+      'expand'   { Expand-Panel }
+      'collapse' { if ($script:Mode -eq 'panel') { Collapse-Panel } else { Collapse-Pill } }
+      'pause'    { Set-Paused $true }
+      'resume'   { Set-Paused $false }
+      'recenter' { Reset-Position }
+      'pill'     { if ($script:Last) { Render $script:Last 1 } }
+    }
+  } catch {}
+}
+
+# 改配置并写回磁盘（菜单、托盘、外部程序都走这一个口子，所以「改了没落盘」只可能有一处原因）
+function Set-Pref($key, $value) {
+  [void](Write-Prefs $script:ConfigFile $key $value)
+  $script:PrefsMtime = (Get-Item $script:ConfigFile).LastWriteTime
+  $old = $script:P
+  Load-Prefs
+  $diff = @(Get-PrefsDiff $old $script:P)
+  if ($diff.Count -gt 0) { Apply-Prefs $diff }
+}
+
+function Set-PrefMany($map) {
+  [void](Write-PrefsFile $script:ConfigFile $map)
+  $script:PrefsMtime = (Get-Item $script:ConfigFile).LastWriteTime
+  $old = $script:P
+  Load-Prefs
+  $diff = @(Get-PrefsDiff $old $script:P)
+  if ($diff.Count -gt 0) { Apply-Prefs $diff }
+}
+
+function Set-Paused($on) {
+  $script:Paused = [bool]$on
+  if ($script:Paused) { Collapse-Pill } else { if (Test-IdleShown) { Show-Idle } }
+  Sync-MenuLabels
+  "[island] 弹条$(if ($script:Paused) { '已暂停（只记未读数）' } else { '已恢复' })" | Write-Host
+}
+
+# 复位 = 清掉自由位置，回到锚位（不是把 scale 也归 1，那是另一件事）
+function Reset-Position {
+  Set-PrefMany @{ anchor = 'top-center'; x = -1; y = -1; offset = 0; offsetY = 0 }
+  '[island] 位置已复位到顶部居中' | Write-Host
+}
+
+# 菜单项文案跟着生效值走：用户点一下看到的必须是当前状态，不然「换档」两字没有意义
+function Get-PrefMenuText($key, $v) {
+  switch ($key) {
+    'fullscreen' { switch ($v) { 'float' { '照常悬浮' } 'hide' { '完全隐藏' } default { '缩成把手' } } }
+    'trigger'    { switch ($v) { 'hover' { '悬停' } 'click' { '单击' } 'longpress' { '长按' } default { '只认托盘/API' } } }
+    'clickThrough' { if ($v) { '穿透（压上小条时可拖）' } else { '不穿透（一直收点击）' } }
+    'animOn'     { if ($v) { '开' } else { '关' } }
+  }
+}
+function Cycle-Pref($key) {
+  $order = switch ($key) {
+    'fullscreen' { 'float', 'handle', 'hide' }
+    'trigger'    { 'hover', 'click', 'longpress', 'manual' }
+    'clickThrough' { $true, $false }
+    'animOn'     { $true, $false }
+  }
+  $cur = [string]$script:P[$key]
+  $i = 0
+  for ($j = 0; $j -lt $order.Count; $j++) { if ("$($order[$j])" -eq $cur) { $i = $j } }
+  Set-Pref $key $order[($i + 1) % $order.Count]
+}
+function Sync-MenuLabels {
+  if ($script:miFs) { $script:miFs.Header = "全屏时：$(Get-PrefMenuText 'fullscreen' $script:P.fullscreen)" }
+  if ($script:tiFs) { $script:tiFs.Text = $script:miFs.Header }
+  if ($script:miTrig) { $script:miTrig.Header = "展开触发：$(Get-PrefMenuText 'trigger' $script:P.trigger)" }
+  if ($script:miThru) { $script:miThru.Header = "小条鼠标：$(Get-PrefMenuText 'clickThrough' $script:P.clickThrough)" }
+  if ($script:miAnim) { $script:miAnim.Header = "动画：$(Get-PrefMenuText 'animOn' $script:P.animOn)" }
+  if ($script:miPause) { $script:miPause.Header = if ($script:Paused) { '继续弹条（已暂停）' } else { '暂停弹条' } }
 }
 
 function Show-Handle { Set-Mode 'handle'; Update-Handle }
 
+# 入场位移的方向：面板往上长（底部锚位）时就得从下面滑进来，不然动画是倒着放的
+function Get-SlideY {
+  if ($script:StackUp) { return [double]$script:P.slidePx }
+  return -[double]$script:P.slidePx
+}
+
 function Show-Pill {
+  $p = $script:P
   Set-Mode 'pill'
-  Animate $script:pill ([System.Windows.UIElement]::OpacityProperty) 1 170
-  Animate $script:pillDy ([System.Windows.Media.TranslateTransform]::YProperty) 0 240
-  $script:Until = (Get-Date).AddMilliseconds($script:HoldMs)
+  $script:pillDy.Y = Get-SlideY
+  Animate $script:pill ([System.Windows.UIElement]::OpacityProperty) 1 $p.fadeMs
+  Animate $script:pillDy ([System.Windows.Media.TranslateTransform]::YProperty) 0 $p.animMs
+  $script:Until = (Get-Date).AddMilliseconds($p.holdMs)
 }
 
 # 收起要先淡出再换内容：立刻 Set-Mode 会把内容撤掉，淡出动画就变成「啪一下消失」
 function Start-Fade {
   $script:Mode = 'fading'
-  $script:FadeAt = (Get-Date).AddMilliseconds(170)
+  # 关掉动画时 fadeMs=0，这里给 30ms 兜底，不然会卡在 fading 里没人接手
+  $script:FadeAt = (Get-Date).AddMilliseconds([Math]::Max(30, [int]$script:P.fadeMs))
 }
 
 function Collapse-Pill {
   if ($script:Mode -ne 'pill') { return }
-  Animate $script:pill ([System.Windows.UIElement]::OpacityProperty) 0 170
-  Animate $script:pillDy ([System.Windows.Media.TranslateTransform]::YProperty) -8 170
+  $p = $script:P
+  Animate $script:pill ([System.Windows.UIElement]::OpacityProperty) 0 $p.fadeMs
+  Animate $script:pillDy ([System.Windows.Media.TranslateTransform]::YProperty) (Get-SlideY) $p.fadeMs
   Start-Fade
 }
 
 function Expand-Panel {
+  $p = $script:P
   Refresh-Panel
   Set-Mode 'panel'
-  # 展开这一瞬间光标还停在顶边（顶边之上没有屏幕了），所以先给半秒反应时间再判「离开」
-  $script:LeaveAt = (Get-Date).AddMilliseconds(500)
-  Animate $script:panel ([System.Windows.UIElement]::OpacityProperty) 1 170
-  Animate $script:panelDy ([System.Windows.Media.TranslateTransform]::YProperty) 0 220
+  # 展开这一瞬间光标往往还压在触发点上（顶边之上没有屏幕了），所以先给一段宽限期再判「离开」
+  $script:LeaveAt = (Get-Date).AddMilliseconds($p.openGraceMs)
+  $script:panelDy.Y = Get-SlideY
+  Animate $script:panel ([System.Windows.UIElement]::OpacityProperty) 1 $p.fadeMs
+  Animate $script:panelDy ([System.Windows.Media.TranslateTransform]::YProperty) 0 $p.animMs
   "[island] 展开未读列表 cnt=$($script:cnt.Text)" | Write-Host
 }
 
 function Collapse-Panel {
   if ($script:Mode -ne 'panel') { return }
+  $p = $script:P
   $script:SchedMode = 'today'
-  Animate $script:panel ([System.Windows.UIElement]::OpacityProperty) 0 150
-  Animate $script:panelDy ([System.Windows.Media.TranslateTransform]::YProperty) -10 150
+  Animate $script:panel ([System.Windows.UIElement]::OpacityProperty) 0 $p.fadeMs
+  Animate $script:panelDy ([System.Windows.Media.TranslateTransform]::YProperty) (Get-SlideY) $p.fadeMs
   Start-Fade
   '[island] 收起未读列表' | Write-Host
 }
@@ -828,10 +1157,9 @@ function Render($item, $burst) {
   $script:title.Text = [string]$item.title
   $script:body.Text  = [string]$item.body
   $script:accent.Background = Get-Brush ([string]$item.appId)
-  $script:chipBox.Visibility = if ($u -gt 0) { 'Visible' } else { 'Collapsed' }
+  $script:chipBox.Visibility = if ($script:P.showUnread -and $u -gt 0) { 'Visible' } else { 'Collapsed' }
   $script:chip.Text = if ($burst -gt 1) { "+$($burst - 1) · $u 未读" } else { "$u 未读" }
-  Move-To-Top
-  Show-Pill
+  Show-Pill          # 定位在 Set-Mode 里做（Place-Island），这里不再单独摆一次
   # 这行是「静默实例」的唯一信号：capture.log 有货而这里没有渲染行，就是窗口从没显示出来过，
   # 用 launch.ps1 重启（手工 Start-Process 起的实例若父 shell 被杀，出现过进程活着窗口不显示）
   "[island] 渲染 id=$($item.id) app=$($script:name.Text) 未读=$u" | Write-Host
@@ -1162,23 +1490,100 @@ function Copy-All-Unread() {
 }
 
 
-function Test-Hot {
-  $y = [IslandWin32]::CursorY()
-  if ($y -lt 0 -or $y -gt ($script:WA.Y + $HotPx)) { return $false }
-  $x = [IslandWin32]::CursorX()
-  $c = $script:WA.X + $script:WA.Width / 2
-  return ([Math]::Abs($x - $c) -le ($script:Wide / 2 + 30))
-}
-function Test-OverPanel {
-  if ($script:win.IsMouseOver) { return $true }
-  $y = [IslandWin32]::CursorY()
-  return ($y -ge 0 -and $y -le ($script:WA.Y + [int][Math]::Ceiling($script:win.ActualHeight) + 14))
+# ---------- 触发与拖拽：判定只看配置项，实现里不留数字 ----------
+# 光标位置换成 DIP：Win32 给的是物理像素，窗口的 Left/Top 是 DIP，
+# 125%/150% 缩放的机器上直接比会差出几百像素（hover 永远判不中）。
+function Get-CursorDip {
+  $s = Get-DipScale
+  return @{ X = [double][IslandWin32]::CursorX() / $s; Y = [double][IslandWin32]::CursorY() / $s }
 }
 
-# ---------- 定时器：70ms 一次（光标要跟手），读队列每 4 次一次，对账每 30 次一次 ----------
+# 小条在屏幕上的矩形（DIP）。往上长时小条贴在窗口下沿，锚位/命中都要按它算。
+function Get-BarRect {
+  $bar = Get-BarH
+  $h = Get-IslandH
+  $y = if ($script:StackUp) { [double]$script:win.Top + $h - $bar } else { [double]$script:win.Top }
+  return @{ X = [double]$script:win.Left; Y = $y; W = Get-FootW; H = $bar }
+}
+
+function Test-OverBar {
+  $p = $script:P
+  $c = Get-CursorDip
+  if ($c.X -lt 0 -or $c.Y -lt 0) { return $false }        # 光标在副屏负坐标之外时 Win32 也给负值
+  $r = Get-BarRect
+  $g = [double]$p.hotPx
+  return ($c.X -ge ($r.X - $g) -and $c.X -le ($r.X + $r.W + $g) -and
+          $c.Y -ge ($r.Y - $g) -and $c.Y -le ($r.Y + $r.H + $g))
+}
+
+# hover 档：够到小条并且停够 dwellMs 才算。dwellMs=0 时不额外等一帧，碰到就开。
+function Test-HoverTrigger {
+  $p = $script:P
+  if ([string]$p.trigger -ne 'hover' -or -not (Test-OverBar)) { $script:HoverAt = $null; return $false }
+  if ($p.dwellMs -le 0) { return $true }
+  if (-not $script:HoverAt) { $script:HoverAt = Get-Date; return $false }
+  return ((Get-Date) - $script:HoverAt).TotalMilliseconds -ge [int]$p.dwellMs
+}
+
+# 按下之后的分流：位移超 dragPx = 拖拽；按住不松超 longPressMs = 长按；否则松手算单击。
+# 松手一定要在这里判（而不是只挂 MouseLeftButtonUp）：用户在岛上按下、甩到别处松开时，
+# WPF 不会给我们 Up 事件，状态就永久卡在「按着」上。
+function Update-Press {
+  if (-not $script:PressAt) { return }
+  $p = $script:P
+  $down = [IslandWin32]::LeftDown()
+  $c = Get-CursorDip
+  if (-not $down) { End-Press $c; return }
+  if (-not $script:Dragged) {
+    $moved = [Math]::Max([Math]::Abs($c.X - $script:PressX), [Math]::Abs($c.Y - $script:PressY))
+    if ($moved -ge [double]$p.dragPx) { $script:Dragged = $true }
+  }
+  if ($script:Dragged) {
+    $script:win.Left = $c.X - $script:DragOff.X
+    $script:win.Top  = $c.Y - $script:DragOff.Y
+    return
+  }
+  if (([string]$p.trigger -eq 'longpress') -and -not $script:LongFired) {
+    $held = ((Get-Date) - $script:PressAt).TotalMilliseconds
+    if ($held -ge [double]$p.longPressMs) { $script:LongFired = $true; Expand-Panel }
+  }
+}
+
+function Begin-Press {
+  $c = Get-CursorDip
+  $script:PressAt = Get-Date
+  $script:PressX = $c.X; $script:PressY = $c.Y
+  $script:DragOff = @{ X = $c.X - [double]$script:win.Left; Y = $c.Y - [double]$script:win.Top }
+  $script:Dragged = $false
+  $script:LongFired = $false
+}
+
+function End-Press($c) {
+  $script:PressAt = $null
+  if ($script:Dragged) {
+    # 拖完立刻落盘：下次启动要回到用户放的地方，而不是回到顶部居中
+    $r = Get-BarRect
+    Set-PrefMany @{ anchor = 'free'; x = [int]$r.X; y = [int]$r.Y }
+    "[island] 已拖到 $([int]$r.X),$([int]$r.Y)（DIP），写回 config.json" | Write-Host
+    $script:Dragged = $false
+    return
+  }
+  if (([string]$script:P.trigger -eq 'click') -and -not $script:LongFired) { Expand-Panel }
+}
+
+function Test-OverPanel {
+  if ($script:win.IsMouseOver) { return $true }
+  $c = Get-CursorDip
+  if ($c.Y -lt 0) { return $false }
+  return ($c.Y -le ([double]$script:win.Top + [Math]::Ceiling($script:win.ActualHeight) + 14) -and
+          $c.X -ge ([double]$script:win.Left - 20) -and
+          $c.X -le ([double]$script:win.Left + $script:win.ActualWidth + 20))
+}
+
+# ---------- 定时器：默认 70ms 一次（光标要跟手），读队列每 4 次、对账每 30 次、配置每秒 ----------
 $script:tick = 0
 $script:timer = New-Object System.Windows.Threading.DispatcherTimer
-$script:timer.Interval = [TimeSpan]::FromMilliseconds($PollMs)
+$script:timer.Interval = [TimeSpan]::FromMilliseconds([int]$script:P.pollMs)
 $script:timer.Add_Tick({
   $script:tick++
   if ($script:HintUntil -and (Get-Date) -gt $script:HintUntil) {
@@ -1190,35 +1595,44 @@ $script:timer.Add_Tick({
     if ($new.Count -gt 0) {
       if ($script:Mode -eq 'panel') { Refresh-Panel }        # 展开着来新通知：只刷列表，不再弹胶囊
       elseif ($script:Paused) { Update-Handle }
+      elseif (-not $script:P.pillOn -or (Get-IdleMode) -eq 'hidden') {
+        # 不弹不等于不记：未读数和「上一条」照算，面板里列得全，只是不打扰
+        $script:Last = $new[-1]
+        "[island] 按配置压住 id=$($script:Last.id)（$($script:Last.title)）不弹：pillOn=$($script:P.pillOn) 常驻态=$(Get-IdleMode)" | Write-Host
+      }
       else { Render $new[-1] $new.Count }
     }
   }
+  Update-Press
+  Sync-ClickThrough          # 光标压上小条的那一刻就要能吃点击，不然拖不动
+  if ($script:tick % 4 -eq 3) { Sync-Topmost }   # 菜单开着就别抢置顶，抢了会把菜单压到岛下面
   if ($script:tick % 30 -eq 0) { Sync-Live }
+  if ($script:P.autoTopmost -and -not $script:MenuUp -and $script:tick % 30 -eq 7) {
+    [void][IslandWin32]::ForceTopmost($script:hwnd)          # 被别的 TopMost 压住时抢回来
+  }
   if ($script:tick % 15 -eq 0) {
-    # 秒级：时钟走字；常驻态还要跟着「前台是不是最大化窗口」在 6px 把手和小条之间换形
+    # 秒级：时钟走字；配置热加载；常驻态跟着「前台是不是铺满一屏」换形
     Update-Clock
-    if ($script:Mode -eq 'handle' -or $script:Mode -eq 'clock') {
-      $want = if ($NoClock -or (Test-ForegroundMaximized)) { 'handle' } else { 'clock' }
-      if ($want -ne $script:Mode) { Show-Idle }
-    }
+    Update-Prefs
+    if (Test-IdleShown -and (Get-IdleMode) -ne $script:Mode) { Show-Idle }
   }
   if ($script:tick % 143 -eq 0) { Update-Meta }        # ~10 秒看一次天气/日程文件变了没
   switch ($script:Mode) {
     'pill' {
-      if (Test-Hot) { Collapse-Pill; Expand-Panel }
+      if (Test-HoverTrigger) { Collapse-Pill; Expand-Panel }
       elseif ((Get-Date) -gt $script:Until -and -not $script:win.IsMouseOver) { Collapse-Pill }
     }
     'panel' {
-      if (Test-OverPanel) { $script:LeaveAt = (Get-Date).AddMilliseconds(500) }
+      if (Test-OverPanel) { $script:LeaveAt = (Get-Date).AddMilliseconds($script:P.collapseMs) }
       elseif ((Get-Date) -gt $script:LeaveAt) { Collapse-Panel }
     }
     'fading' {
-      # 淡出途中又滑回顶边：直接换面板，别等淡完
-      if (Test-Hot) { Expand-Panel }
+      # 淡出途中又够到小条：直接换面板，别等淡完
+      if (Test-HoverTrigger) { Expand-Panel }
       elseif ((Get-Date) -gt $script:FadeAt) { Show-Idle }
     }
     default {
-      if (Test-Hot) { Expand-Panel }
+      if (Test-HoverTrigger) { Expand-Panel }
     }
   }
 })
@@ -1230,12 +1644,26 @@ $script:pill.Add_MouseLeftButtonUp({
   Collapse-Pill
 })
 $script:pill.Add_MouseRightButtonUp({ $script:ctx.IsOpen = $true })
-# 把手态是点击穿透的，所以这里不挂点击事件（挂了也收不到）：展开只认「光标顶到屏幕上边」，
-# 加这条是因为点把手会连带点到最大化窗口的标题栏，那是别人的交互区。
 
+# 小条上的鼠标动作。clickThrough=true 时这些一个都收不到（事件被穿透到下面的窗口），
+# 所以 prefs.ps1 里 trigger=click/longpress 会自动把穿透关掉 —— 不是这里做两套逻辑。
+$script:clock.Add_MouseLeftButtonDown({ Begin-Press })
+$script:clock.Add_MouseRightButtonUp({ $script:ctx.IsOpen = $true })
+$script:clock.Add_MouseWheel({
+  param($s, $e)
+  $e.Handled = $true
+  $cur = [double]$script:P.scale
+  $next = [Math]::Round($cur + $(if ($e.Delta -gt 0) { 0.05 } else { -0.05 }), 2)
+  if ($next -eq $cur) { return }
+  # 上下限交给 spec 夹（scale: 0.7~1.8），这里不重复写数字
+  Set-Pref 'scale' $next
+})
 $tip = New-Object System.Windows.Controls.ToolTip
 $tip.Content = '左键：打开来源应用    右键：菜单'
 $script:pill.ToolTip = $tip
+$clockTip = New-Object System.Windows.Controls.ToolTip
+$clockTip.Content = '拖动 = 挪位置（会记住）    滚轮 = 缩放    右键 = 菜单'
+$script:clock.ToolTip = $clockTip
 
 $script:ctx = New-Object System.Windows.Controls.ContextMenu
 function Add-Menu($header, $action) {
@@ -1245,11 +1673,18 @@ function Add-Menu($header, $action) {
   [void]$script:ctx.Items.Add($mi)
   return $mi
 }
-$script:miPause = Add-Menu '暂停弹条' {
-  $script:Paused = -not $script:Paused
-  $script:miPause.Header = if ($script:Paused) { '继续弹条（已暂停）' } else { '暂停弹条' }
-  if ($script:Paused) { Collapse-Pill }
-}
+# 改配置的入口排在最前面：菜单是从鼠标位置往下长的，压在屏幕顶部时后面几项容易被够不着，
+# 而「换档」恰恰是用户点开菜单的目的。这四条就是把 config.json 的关键行为搬到鼠标上：
+# 点一下换下一档，立刻生效并写回盘。
+$script:miFs = Add-Menu '' { Cycle-Pref 'fullscreen' }
+$script:miTrig = Add-Menu '' { Cycle-Pref 'trigger' }
+$script:miThru = Add-Menu '' { Cycle-Pref 'clickThrough' }
+$script:miAnim = Add-Menu '' { Cycle-Pref 'animOn' }
+[void](Add-Menu '复位到顶部居中' { Reset-Position })
+[void](Add-Menu '打开配置文件 config.json' {
+  if (Test-Path $script:ConfigFile) { Invoke-Item $script:ConfigFile } else { Invoke-Item $script:DataDir }
+})
+$script:miPause = Add-Menu '暂停弹条' { Set-Paused (-not $script:Paused) }
 [void](Add-Menu '展开未读列表' { Expand-Panel })
 [void](Add-Menu '重看上一条' { if ($script:Last) { Render $script:Last 1 } })
 [void](Add-Menu '复制上一条（完整正文）' { Copy-Message $script:Last $false })
@@ -1257,15 +1692,13 @@ $script:miPause = Add-Menu '暂停弹条' {
 [void](Add-Menu '刷新天气/日程' {
   # 抓取层自己按 everyMin 节流，这里就起一个一次性的 meta.mjs 强制重拉，几秒后文件 mtime 变了会自动刷进来
   try {
-    Start-Process -FilePath 'node' -ArgumentList "`"$($script:MetaScript)`"" -WindowStyle Hidden
+    Start-Process -FilePath (Get-NodeExe) -ArgumentList "`"$($script:MetaScript)`"" -WindowStyle Hidden
     '[meta] 已触发重拉天气/日程' | Write-Host
   } catch { "[meta] 刷新失败：$($_.Exception.Message)" | Write-Host }
 })
-[void](Add-Menu '天气/日程设置' {
-  if (Test-Path $script:ConfigFile) { Invoke-Item $script:ConfigFile } else { Invoke-Item $script:DataDir }
-})
 [void](Add-Menu '打开岛目录' { Invoke-Item $script:DataDir })
 [void](Add-Menu '退出岛屿' { $script:tray.Visible = $false; $script:timer.Stop(); $script:win.Close() })
+Sync-MenuLabels
 
 $script:rowMenu = New-Object System.Windows.Controls.ContextMenu
 $script:rowTarget = $null
@@ -1351,31 +1784,51 @@ $script:tray = New-Object System.Windows.Forms.NotifyIcon
 $script:tray.Icon = [System.Drawing.SystemIcons]::Application
 $script:tray.Visible = $true
 $script:tray.Text = 'Windows 原子岛：左键单击图标展开未读列表'
-$tm = New-Object System.Windows.Forms.ContextMenuStrip
-[void]$tm.Items.Add('展开未读列表').Add_Click({ Expand-Panel })
-[void]$tm.Items.Add('打开岛目录').Add_Click({ Invoke-Item $script:DataDir })
-[void]$tm.Items.Add('退出').Add_Click({ $script:tray.Visible = $false; $script:timer.Stop(); $script:win.Close() })
-$script:tray.ContextMenuStrip = $tm
+# 托盘要有一份独立的入口：trigger=manual 或穿透锁住小条时，岛上的鼠标动作全都不通，
+# 只有托盘还能换档；WinForms 的 MenuItem 也塞不进 WPF 的 ContextMenu，所以只能各建一份
+$script:trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+# 和岛上的右键菜单同一个次序：改配置的排前面
+$script:tiFs = $script:trayMenu.Items.Add('全屏时：…')
+$script:tiFs.Add_Click({ Cycle-Pref 'fullscreen' })
+[void]$script:trayMenu.Items.Add('复位到顶部居中').Add_Click({ Reset-Position })
+[void]$script:trayMenu.Items.Add('打开配置文件').Add_Click({ if (Test-Path $script:ConfigFile) { Invoke-Item $script:ConfigFile } else { Invoke-Item $script:DataDir } })
+[void]$script:trayMenu.Items.Add('展开未读列表').Add_Click({ Expand-Panel })
+[void]$script:trayMenu.Items.Add('打开岛目录').Add_Click({ Invoke-Item $script:DataDir })
+[void]$script:trayMenu.Items.Add('退出').Add_Click({ $script:tray.Visible = $false; $script:timer.Stop(); $script:win.Close() })
+$script:tray.ContextMenuStrip = $script:trayMenu
+Sync-MenuLabels
 $script:tray.Add_MouseClick({ if ($script:Mode -eq 'panel') { Collapse-Panel } else { Expand-Panel } })
 
 $script:win.Add_SourceInitialized({
   $helper = New-Object System.Windows.Interop.WindowInteropHelper($script:win)
   $script:hwnd = [IntPtr]$helper.Handle
-  Show-Idle
+  # 穿透状态要等 HWND 建出来才设得进去，而配置在拼 XAML 前就读好了，所以这里补一次
+  Set-ClickThrough ((Test-IdleShown) -and [bool]$script:P.clickThrough)
 })
+# 窗口尺寸一变（展开面板、改缩放、换字体）就重算位置：底部/中间锚位全靠这一步才不跳
+$script:win.Add_SizeChanged({ Place-Island })
 $script:win.Add_Closed({
   Save-State
   $script:timer.Stop(); $script:tray.Visible = $false; $script:app.Shutdown()
 })
 
 Load-State
-Move-To-Top
-Read-New | Out-Null      # 启动就把历史队列读满：上滑要看的是全部，不是「本次运行以来」
+Read-New | Out-Null      # 启动就把历史队列读满：展开要看的是全部，不是「本次运行以来」
+$script:uiScale.ScaleX = [double]$script:P.scale
+$script:uiScale.ScaleY = [double]$script:P.scale
+Place-Island
+Update-Clock
 Sync-Live
 Update-Meta
 Show-Idle
 $wxn = if ($script:Weather) { "$($script:Weather.temp)° $($script:Weather.txt) $($script:Weather.city)" } else { '无' }
 $sdn = if ($script:Agenda) { "$($script:Agenda.n) 件" } else { '无' }
-"[island] pid=$PID queue=$Queue wide=$Wide hold=${HoldMs}ms 热点=${HotPx}px 队列 $($script:All.Count) 条 未读 $(@(Get-Unread).Count) 天气=$wxn 日程=$sdn 工作区=$($script:WA.Width)x$($script:WA.Height)" | Write-Host
+$p = $script:P
+# 启动就把生效值整行打出来：调配置的人第一眼要看到的是「我写的值到底被采纳了还是被夹回了默认」
+"[island] pid=$PID queue=$Queue" | Write-Host
+"[island] 生效配置 位置=$($p.anchor)($($p.x),$($p.y)) 偏移=$($p.offset)/$($p.offsetY) 缩放=$($p.scale) 宽=$([int](Get-FootW)) " +
+  "触发=$($p.trigger)(hot=$($p.hotPx) dwell=$($p.dwellMs)) 停留=$($p.holdMs)ms 收起=$($p.collapseMs)ms 动画=$($p.animOn)($($p.fadeMs)/$($p.animMs)/$($p.slidePx))" | Write-Host
+"[island] 生效配置 全屏=$($p.fullscreen) 小条=$($p.showClock) 胶囊=$($p.pillOn) 穿透=$($p.clickThrough) 置顶重申=$($p.autoTopmost) " +
+  "队列 $($script:All.Count) 条 未读 $(@(Get-Unread).Count) 天气=$wxn 日程=$sdn" | Write-Host
 $script:app = New-Object System.Windows.Application
 $script:app.Run($script:win)

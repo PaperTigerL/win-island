@@ -15,7 +15,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { tickMeta } from './meta.mjs';
+import { tickMeta } from '../schedule/meta.mjs';
 import { startApi } from './api.mjs';
 
 const LAD = process.env.LOCALAPPDATA || process.env.TEMP;
