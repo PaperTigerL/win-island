@@ -43,8 +43,10 @@ const SELF = /^(precheck-publish\.mjs|precheck-private\.json|pack-release\.mjs)$
 
 // 递归列全部文件：发布包从 v1 起就是 src/ test/ docs/ 的嵌套结构，
 // 只扫顶层等于「最可能藏东西的子目录恰好没看」
-const walk = d => readdirSync(d, { withFileTypes: true }).flatMap(e =>
-  e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]);
+// .git/ 不参与：那里面是本机的 reflog（含本地 git 配置里的身份），不是要公开的文件内容
+const walk = d => readdirSync(d, { withFileTypes: true })
+  .filter(e => !(e.isDirectory() && e.name === '.git'))
+  .flatMap(e => e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]);
 
 const scan = (label, pats, { onBinary = 'ascii' } = {}) => {
   let n = 0;
