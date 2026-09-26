@@ -1,0 +1,43 @@
+# 运行时数据：通知正文、已读账本、日程/假期、导入库全在 %LOCALAPPDATA%\win-island，不进仓库
+*.log
+queue.jsonl
+read.json
+live.json
+weather.json
+geo.json
+agenda.json
+week.json
+holidays.json
+cal.db*
+last-copy.txt
+*.pid
+config.json
+
+# 个人真数据：示例课表可以留，你导出来的那份不行
+timetable*.ics
+
+# 调试 dump / 备份 / 打包产物
+dist/
+*.bak
+*.out
+act*.txt
+click*.txt
+launchout*.txt
+snapout*.txt
+mtp*.txt
+isl*.txt
+procs.txt
+pstore.txt
+rawwin.txt
+repost*.txt
+regress.txt
+dryrun.txt
+dump.txt
+lint*.txt
+clip-now.txt
+cp*.txt
+dbg.txt
+wx.txt
+s.txt
+st.txt
+c3.txt
