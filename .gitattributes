@@ -1,0 +1,15 @@
+# 全部按 LF 存，别让克隆者机器上的 core.autocrlf 悄悄改动手感（.ps1 认 BOM 不认 CRLF）
+* text=auto eol=lf
+*.ps1 text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.cs text eol=lf
+*.rc text eol=lf
+*.md text eol=lf
+
+# 二进制只认字节：exe 被当文本处理过一次就废了
+*.exe binary
+*.ico binary
+*.png binary
+*.db binary
+*.res binary
