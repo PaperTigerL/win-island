@@ -43,6 +43,7 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'prefs.ps1')
 . (Join-Path $PSScriptRoot 'geometry.ps1')
 . (Join-Path $PSScriptRoot 'queue.ps1')
+. (Join-Path $PSScriptRoot 'notify.ps1')
 . (Join-Path $PSScriptRoot 'audio.ps1')
 
 if (-not $Queue) { $Queue = Join-Path $env:LOCALAPPDATA 'win-island\queue.jsonl' }
@@ -144,6 +145,8 @@ function Load-Prefs {
   if (Test-Path $script:ConfigFile) { $script:PrefsMtime = (Get-Item $script:ConfigFile).LastWriteTime }
 }
 Load-Prefs
+# 外部通知是单向接入：路径来自顶层 notify.path，不属于 $PrefsSpec，也不走 config.set。
+[void](Set-NotifyPath (Get-NotifyPath $script:ConfigFile $script:NotifyDefaultPath))
 
 # 缩放后的外框宽度：所有「岛有多宽」的判断都走这里，不再直接读 wide
 function Get-FootW { return [double]$script:P.wide * [double]$script:P.scale }
@@ -1193,6 +1196,13 @@ function Update-Prefs {
     $script:PrefsMtime = $t
     $old = $script:P
     Load-Prefs
+    # notify.path 不在 spec 里，但同样要热生效：换文件时旧那批条目作废，新的先静默入账
+    $np = Get-NotifyPath $script:ConfigFile $script:NotifyDefaultPath
+    if (Set-NotifyPath $np) {
+      $boot = @(Read-NotifyNew $script:NotifyPath 200)
+      "[island] notify.path -> $($script:NotifyPath)（只读接入，入账 $($boot.Count) 条，未读 $(@(Get-Unread).Count)）" | Write-Host
+      if ($script:Mode -eq 'panel') { Refresh-Panel } else { Update-Handle }
+    }
     $diff = @(Get-PrefsDiff $old $script:P)
     if ($diff.Count -gt 0) { Apply-Prefs $diff }
     Invoke-PrefsRequest
@@ -1351,7 +1361,13 @@ function Sync-MenuLabels {
   if ($script:miAudio) { $script:miAudio.Header = "实时频谱：$(Get-PrefMenuText 'audioOn' $script:P.audioOn)" }
   if ($script:tiAudio) { $script:tiAudio.Text = $script:miAudio.Header }
   if ($script:miPause) { $script:miPause.Header = if ($script:Paused) { '继续弹条（已暂停）' } else { '暂停弹条' } }
-  if ($script:tray) { $script:tray.Text = Get-TrayText }
+  if ($script:tray) {
+    $tt = Get-TrayText
+    if ($script:tray.Text -ne $tt) {
+      $script:tray.Text = $tt
+      "[island] 托盘提示：$tt" | Write-Host
+    }
+  }
 }
 
 function Show-Handle { Set-Mode 'handle'; Update-Handle }
@@ -1425,8 +1441,17 @@ function Load-State {
 }
 
 function Save-State {
-  # id 是通知库的自增行号，比队列里最小行号还老的那些永远查不到了，直接丢
-  $keep = { param($h) @($h.Keys | Sort-Object { [int64]$_ } | Select-Object -Last 400) }
+  # id 是通知库的自增行号，比队列里最小行号还老的那些永远查不到了，直接丢。
+  # 外部通知的 id 是 "notify:<原文>"，不是数字 —— 不能直接 [int64]，否则这一句会抛、整份账本写不出去。
+  $keep = {
+    param($h)
+    $num = @(); $str = @()
+    foreach ($k in @($h.Keys)) {
+      $n = 0L
+      if ([int64]::TryParse([string]$k, [ref]$n)) { $num += $n } else { $str += [string]$k }
+    }
+    return @(@($num | Sort-Object | Select-Object -Last 400) + @($str | Sort-Object | Select-Object -Last 400))
+  }
   $body = @{
     opened    = & $keep $script:Opened
     dismissed = & $keep $script:Dismissed
@@ -1440,10 +1465,12 @@ function Save-State {
 }
 
 function Get-Unread {
-  @($script:All | Where-Object {
+  # 外部通知和队列条目混排。排序按 ms（两类都有），数字 id 只作退化兜底 ——
+  # 原来直接 [int64]$_.id，外部 id 一带前缀就会整条列表抛异常。
+  @(Get-AllItems | Where-Object {
       $id = [string]$_.id
       (-not $script:Opened[$id]) -and (-not $script:Dismissed[$id]) -and (-not $script:Gone[$id])
-    } | Sort-Object { [int64]$_.id } -Descending)
+    } | Sort-Object { Get-ItemTimeMs $_ } -Descending)
 }
 
 function Mark-Opened($item) {
@@ -1481,6 +1508,24 @@ function Sync-Live {
     foreach ($id in @($d.Add)) { $script:Gone[$id] = $true; $script:Totals.gone++ }
     if ($changed) { Save-State; if ($script:Mode -eq 'panel') { Refresh-Panel } else { Update-Handle } }
   } catch {}
+}
+
+# 外部通知的增量同步：每秒一拍，但文件 mtime/长度没变时 Read-NotifyNew 会立刻返回。
+# 只进本地账本和面板，不写回源文件、不联网、不碰通知里的内容。
+function Sync-Notify {
+  try {
+    $new = @(Read-NotifyNew $script:NotifyPath 200)
+    if ($new.Count -eq 0) { return }
+    $u = @(Get-Unread).Count
+    "[island] 外部通知 +$($new.Count) 条（只读展示）未读=$u" | Write-Host
+    if ($script:Mode -eq 'panel') { Refresh-Panel }
+    elseif ($script:Paused) { Update-Handle }
+    elseif (-not $script:P.pillOn -or (Get-IdleMode) -eq 'hidden') {
+      $script:Last = $new[-1]
+      "[island] 外部通知按配置压住（pillOn=$($script:P.pillOn) 常驻态=$(Get-IdleMode)）不弹" | Write-Host
+    }
+    else { Render $new[-1] $new.Count }
+  } catch { "[island] 外部通知这轮没读成：$($_.Exception.Message)" | Write-Host }
 }
 
 # ---------- 队列增量读取在 queue.ps1：只吃完整行、按 id 去重、轮转后不重复 ----------
@@ -1672,7 +1717,7 @@ function Refresh-Panel {
     $script:list.MaxHeight = [Math]::Max(140, 470 - $sh)
   }
   $done = $script:Totals.opened + $script:Totals.dismissed
-  $script:foot.Text = "点一条跳到来源应用；鼠标移到那一行、点行尾「复制」拿走全文（右键菜单、Ctrl+C 也可以）。岛屿记到 $done 条，系统侧消失 $($script:Totals.gone) 条（横幅那边点掉的记不到）。"
+  $script:foot.Text = "点一条跳到来源应用（外部通知只读，不跳转）；鼠标移到那一行、点行尾「复制」拿走全文（右键菜单、Ctrl+C 也可以）。岛屿记到 $done 条，系统侧消失 $($script:Totals.gone) 条（横幅那边点掉的记不到）。"
   Update-Clock
   Update-Handle
 }
@@ -1684,6 +1729,13 @@ function Refresh-Panel {
 $script:BadLaunch = '^(file:|javascript:|vbscript:|about:|search-ms:|ms-msdt:|\\\\)'
 function Open-Source($item) {
   if (-not $item) { return $false }
+  # 外部通知是单向展示：点它只记本地已读，绝不按 from/body 去拉起任何程序。
+  # 这个分支必须排在最前面 —— 下面四级都会把字符串变成真实进程。
+  if ($item.notifyOnly) {
+    Mark-Opened $item
+    "[open] 外部通知只读展示，不跳来源、不执行内容；记为已读 id=$($item.id)" | Write-Host
+    return $true
+  }
   # 第 1 级：通知自带的协议深链（实测 QQ 的 ntqq-notification://… 靠这级直接跳到那个会话）
   $l = [string]$item.launch
   if ($l) {
@@ -1988,6 +2040,7 @@ $script:timer.Add_Tick({
     $script:LastSecAt = $secMs
     Update-Clock
     Update-Prefs
+    Sync-Notify        # 外部通知：只读增量，文件没变时是空转
     Sync-GameMode       # 游戏/无边框全屏检测 + 进出降载态（连续 2 次才切）
     # 显示器/DPI 变化才重算锚位：普通 tick 一律不动窗口位置（用户反馈「岛自己乱跑」的来源之一）。
     # 首拍只记指纹，不重复摆一次（启动时已经摆过）。
@@ -2179,6 +2232,7 @@ try {
 } catch { "[island] 托盘图标没读到：$($_.Exception.Message)" | Write-Host }
 $script:tray.Visible = $true
 $script:tray.Text = Get-TrayText
+"[island] 托盘提示：$($script:tray.Text)" | Write-Host
 # 托盘要有一份独立的入口：trigger=manual 或穿透锁住小条时，岛上的鼠标动作全都不通，
 # 只有托盘还能换档；WinForms 的 MenuItem 也塞不进 WPF 的 ContextMenu，所以只能各建一份
 $script:trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -2211,6 +2265,10 @@ $script:win.Add_Closed({
 
 Load-State
 Read-QueueNew $script:Queue $MaxRows | Out-Null   # 启动就把历史队列读满：展开要看的是全部，不是「本次运行以来」
+# 外部通知启动时静默入账：历史条目算未读，但不为它们弹胶囊（和队列的历史处理一致）
+$script:NotifyBoot = @(Read-NotifyNew $script:NotifyPath 200)
+"[island] 外部通知 path=$($script:NotifyPath) 存在=$(Test-Path -LiteralPath $script:NotifyPath) 启动入账=$($script:NotifyBoot.Count) 条" | Write-Host
+$script:NotifyBoot = $null
 $script:uiScale.ScaleX = [double]$script:P.scale
 $script:uiScale.ScaleY = [double]$script:P.scale
 Place-Island
@@ -2228,6 +2286,6 @@ $p = $script:P
   "触发=$($p.trigger)(hot=$($p.hotPx) dwell=$($p.dwellMs)) 停留=$($p.holdMs)ms 收起=$($p.collapseMs)ms 动画=$($p.animOn)($($p.fadeMs)/$($p.animMs)/$($p.slidePx))" | Write-Host
 "[island] 生效配置 全屏=$($p.fullscreen) 小条=$($p.showClock) 胶囊=$($p.pillOn) 穿透=$($p.clickThrough) 置顶重申=$($p.autoTopmost) " +
   "频谱=$($p.audioOn)/$($p.audioBands)格 增益=$($p.audioGain) 停顿=$($p.audioStallMs)ms " +
-  "队列 $($script:All.Count) 条 未读 $(@(Get-Unread).Count) 天气=$wxn 日程=$sdn" | Write-Host
+  "队列 $($script:All.Count) 条 + 外部 $($script:NotifyAll.Count) 条 未读 $(@(Get-Unread).Count) 天气=$wxn 日程=$sdn" | Write-Host
 $script:app = New-Object System.Windows.Application
 $script:app.Run($script:win)

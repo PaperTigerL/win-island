@@ -1,6 +1,7 @@
 # 配置
 
-一个文件：`%LOCALAPPDATA%\win-island\config.json`，三段 —— `island`（悬浮行为）、`weather`、`calendar`。
+一个文件：`%LOCALAPPDATA%\win-island\config.json`，按段分开 —— `island`（悬浮行为）、`weather`、`calendar`、
+`notify`（外部通知只读展示）、`capture`（抓取层回放）。
 第一次运行没有这个文件也能跑，所有项都有默认值；岛屿或 `win-island config` 会为你生成一份。
 
 改完**不用重启**：岛屿每秒比一次文件 mtime，只应用真正变了的项（`[prefs] 热应用 …` 写在 `island.out.log`）。
@@ -120,6 +121,25 @@ WPF 的 `Left`/`Top`/`Width` 是 DIP（设备独立像素），`Forms.Screen` �
 
 检测带 2 次去抖（约 2 秒），alt-tab 出去看一眼再回来不会让岛来回闪；退出后恢复配置里的 `pollMs`
 和常规常驻态。普通最大化窗口有标题栏，不会被当成游戏（那种归 `fullscreen` 管）。
+
+## `notify` 段（单向：只读）
+
+外部通知只做一件事：**读出来显示**。岛不写回这个文件、不向 agent-hub 发任何请求、也不执行通知里的
+任何命令；`from` / `title` / `body` / `level` 全部当展示字符串处理。文件不存在时静默跳过，不影响启动。
+按 `id` 去重；面板里点这类条目只会记为已读，不会拉起来源应用（右键可复制全文或忽略）。
+
+这一段的键不在 `$PrefsSpec` 里（它不属于悬浮行为），`config.set` 也不会改它；改完配置由每秒的
+mtime 热加载重新解析。
+
+| 键 | 默认 | 取值 | 说明 |
+| --- | --- | --- | --- |
+| `path` | `D:/OpenSource/lab/sup/group/out/agent-hub/notifications.jsonl` | 绝对路径 | 只读 JSONL。每行 schema `{id,ts,from,title,body,level}`，`id` 必填（去重键），`ts` 用 ISO 时间 |
+
+```json
+{ "notify": { "path": "D:/OpenSource/lab/sup/group/out/agent-hub/notifications.jsonl" } }
+```
+
+`id` 在岛内部会加 `notify:` 前缀，和通知库的自增行号区分开；同一个 `id` 在文件里出现多次只显示一条。
 
 ## `capture` 段
 

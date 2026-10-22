@@ -6,7 +6,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path $PSScriptRoot          # 仓库根：脚本在 scripts\，代码在 src\
-$D = Join-Path $env:LOCALAPPDATA 'win-island'
+$D = if ($env:WIN_ISLAND_HOME) { $env:WIN_ISLAND_HOME } else { Join-Path $env:LOCALAPPDATA 'win-island' }
 New-Item -ItemType Directory -Force -Path $D | Out-Null
 
 # 用哪个 node：可移植包里带着 bin\node.exe（免环境安装就靠它），否则退回 PATH 上的 node。
@@ -19,6 +19,9 @@ $env:WIN_ISLAND_NODE = $Node
 
 # stop.ps1 只停本仓库这份（按脚本完整路径限定），不会碰 D:\win-island 之类的另一份副本
 & (Join-Path $PSScriptRoot 'stop.ps1')
+
+# 停机后文件已释放：超过 5MB 的日志/队列改名 .1，只留一份历史；当前文件由子进程重新创建
+& (Join-Path $PSScriptRoot 'rotate.ps1') -DataDir $D | Out-Null
 
 # 不能用 Start-Process -RedirectStandardOutput：一加重定向 .NET 就把 UseShellExecute 置 false，
 # 而 UseShellExecute=false 等于 bInheritHandles=true —— 调用方 stdout 管道那个可继承句柄会原样

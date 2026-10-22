@@ -36,6 +36,10 @@ results.push(run('node', [join(ROOT, 'test', 'cal-test.mjs'), '--expect', '59'],
 results.push(run('node', [join(ROOT, 'test', 'cal-flow-test.mjs'), '--expect', '51'], { expect: 51, label: '导入全流程 + 真 HTTP 51 条断言（临时 HOME，不碰真库）' }));
 results.push(run('node', [join(ROOT, 'test', 'prefs-test.mjs'), '--expect', '66'], { expect: 66, label: '配置项 66 条断言（spec/文档/回落 + 热应用 + request + 游戏态 + 吸附）' }));
 results.push(run('node', [join(ROOT, 'test', 'queue-test.mjs'), '--expect', '22'], { expect: 22, label: '队列 22 条断言（半行/轮转/去重 + live 对账，不启 WPF）' }));
+results.push(run('node', [join(ROOT, 'test', 'notify-test.mjs'), '--expect', '43'],
+  { expect: 43, label: '单向通知 43 条断言（去重/字段/无文件/哈希不变 + 只读边界，不碰真实通知文件）' }));
+results.push(run('node', [join(ROOT, 'test', 'rotate-test.mjs'), '--expect', '20'],
+  { expect: 20, label: 'W-6 轮转 20 条断言（>5MB 改名 .1/哈希一致/只留一份，临时目录）' }));
 results.push(run('node', [join(ROOT, 'test', 'replay-test.mjs'), '--expect', '21'],
   { expect: 21, label: '回放 21 条断言（窗口/上限/幂等 + 假通知库端到端，不碰真库）' }));
 results.push(run('node', [join(ROOT, 'test', 'single-instance-test.mjs'), '--expect', '9'],
