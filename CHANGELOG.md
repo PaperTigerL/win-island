@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+2026-10-23 P2 清理：
+
+### 修复
+
+- **混合 DPI（P1-11）**：工作区/光标换算按目标显示器取 DPI（`GetDpiForMonitor` / WPF `VisualTreeHelper.GetDpi`，
+  失败回落主屏比例），每块屏的 Scale 纳入几何指纹；双屏不同缩放的实机验证仍待做（本机无双屏）。
+- **面板空白单击（P2-4）**：未读列表左键只认鼠标下真正命中的 `ListBoxItem`，空白/滚动条不再拿上一次
+  `SelectedItem` 去跳来源应用。
+- **运行期 capture.log 轮转（P2-5）**：抓取层每次写日志前 `>5MB` 就把当前文件改名 `.1`，只留一份历史；
+  `island.out.log` 仍由启动时 `rotate.ps1` 轮转（运行中被 cmd 写句柄占用，不能安全改名）。
+- **Save-State 节流（P2-12）**：连续标记合并为 500ms 一次落盘，tick 里 `Flush-State` 到期写，退出时
+  `Save-StateNow` 无条件写一次，避免每条标记都磁盘写。
+
+### 测试
+
+- geometry 33 条（新增分屏 DPI 换算/指纹 11 条）、log-rotate 10 条、panel-click 7 条、
+  state-throttle 13 条；`node scripts/test-all.mjs --unit` 15 项全部 PASS。
+
 2026-10-21 审计修复（分支 `audit/2026-10-21`）：
 
 ### 修复
@@ -95,10 +113,9 @@
 
 ### 已知未修（2026-10-21 第二轮）
 
-- **混合 DPI 多显示器（P1-11）**：`Get-DipScale` 仍只按主屏算比例。岛放在 125%/150% 的副屏时，
-  hover 命中/拖拽落点可能偏。修法要改成 Per-Monitor DPI 感知（WPF 5.1 上要动 manifest/线程上下文），
-  风险高，**等一台双屏不同缩放的机器实测再动**；本轮只把 `monitorId` / `monitorDpi` 写进配置做诊断，
-  并在 `docs/CONFIG.md`「单位」一节写明限制。
+- ~~**混合 DPI 多显示器（P1-11）**：`Get-DipScale` 仍只按主屏算比例。~~ 已修（2026-10-23）：改为按目标
+  显示器取 DPI，并把每屏 Scale 纳入几何指纹；`monitorId` / `monitorDpi` 继续落盘做诊断。双屏不同缩放的
+  实机验证仍待做（本机无双屏），见 `docs/CONFIG.md`「单位」一节。
 - ~~音频电平可视化（运行副本有、仓库没有）~~：已在 `merge/2026-10-21` 合并，`Set-AudioLevelPaused`
   适配层接上了 `gameMode` 的暂停钩子。
 - **`pollMs` 改后周期漂移（P2-2 只修了一半）**：最影响体验的「秒级」块（时钟/配置热加载/游戏检测/
@@ -109,12 +126,12 @@
   按设计继续留在仓库外（部署包带）。差异清单见审计目录 `RUNTIME-COPY-DIFF-2026-10-21.md`。
 - **公开克隆仍出不了发布包（P1-8）**：`pack-release.mjs` / `precheck-private.json` 是私有文件，
   `build.mjs --release` 现在明确报错并以 2 退出，不再 ENOENT。
-- **审计 P2 其余未修项**：面板空白处单击可能命中上一次选中的行并跳转（P2-4）；`capture.log` /
-  `island.out.log` 没有运行期轮转（P2-5）；管道 `list` 只读队列尾部 256KB（P2-6）；
+- **审计 P2 其余未修项**：~~面板空白处单击可能命中上一次选中的行并跳转（P2-4）~~ 已修；`capture.log`
+  已运行期轮转，`island.out.log` 仍只在启动时轮转（P2-5 部分）；管道 `list` 只读队列尾部 256KB（P2-6）；
   `activationType` 解析了但点开没用到（P2-8）；~~托盘图标是系统占位图~~（P2-9 已修，改用
   `assets/icon.ico` 同档帧）；应用名映射没覆盖
   `BackgroundAccess` / `com.qodercn.app`（P2-10）；`--replay` 的旧条目会被 live 对账标 gone（P2-11）；
-  `Save-State` 每条标记都写盘（P2-12）。
+  ~~`Save-State` 每条标记都写盘（P2-12）~~ 已修（500ms 合并）。
 
 ## [1.0.0] - 2026-09-26
 

@@ -79,9 +79,9 @@ WPF 的 `Left`/`Top`/`Width` 是 DIP（设备独立像素），`Forms.Screen` �
 `monitorDpi` 一起写回（纯诊断）。吸附阈值 `snapPx` 也是 DIP，所以 125% 缩放下屏幕边缘的吸附距离
 在物理像素里会自动变成 12.5px。
 
-**已知限制（待硬件验证）**：`Get-DipScale` 仍按主屏算比例。岛放在 125%/150% 的副屏时，hover 命中
-和拖拽落点可能偏一点 —— 修法要改成 Per-Monitor DPI 感知（WPF 5.1 上要动 manifest/线程上下文），
-风险高，等一台双屏不同缩放的机器实测再动，见 `CHANGELOG` 的「已知未修」。
+**混合 DPI**：工作区/光标换算现在按**目标显示器**取 DPI（`GetDpiForMonitor`，WPF 侧 `VisualTreeHelper.GetDpi`，
+失败回落主屏比例），每块屏的 Scale 也纳入几何指纹。双屏不同缩放的实机验证仍未做（本机无双屏），
+首次上机请复核 hover 命中与拖拽落点；`monitorDpi` 继续作为诊断字段落盘。
 
 ## `weather` 段
 

@@ -59,4 +59,27 @@ Check '显示器尺寸变了 → 指纹变' ($k1 -ne $k2) ('k1=' + $k1 + ' k2=' 
 $k3 = Get-GeoKey $wa 1.0 'auto'
 Check '同样的几何/DPI → 指纹相同' ($k1 -eq $k3) ('k1=' + $k1 + ' k3=' + $k3)
 
+# ---------- P1-11：按目标显示器取 DPI（纯换算 / 分屏工作区 / 指纹） ----------
+Check '96 DPI → 1.0' ((Near (Get-DipScaleFromDpi 96) 1.0)) ('s=' + (Get-DipScaleFromDpi 96))
+Check '120 DPI → 1.25' ((Near (Get-DipScaleFromDpi 120) 1.25)) ('s=' + (Get-DipScaleFromDpi 120))
+Check '144 DPI → 1.5' ((Near (Get-DipScaleFromDpi 144) 1.5)) ('s=' + (Get-DipScaleFromDpi 144))
+Check '0/无效 DPI → 回落到 1.0' ((Near (Get-DipScaleFromDpi 0) 1.0)) ('s=' + (Get-DipScaleFromDpi 0))
+Check '离谱 DPI 夹到 4.0' ((Near (Get-DipScaleFromDpi 9999) 4.0)) ('s=' + (Get-DipScaleFromDpi 9999))
+
+$fakeScreens = @(
+  @{ DeviceName = 'A'; Primary = $true;  WorkingArea = @{ X = 0;    Y = 0; Width = 1920; Height = 1040 } },
+  @{ DeviceName = 'B'; Primary = $false; WorkingArea = @{ X = 1920; Y = 0; Width = 2560; Height = 1400 } }
+)
+$scaleOf = { param($scr) if ($scr.DeviceName -eq 'B') { 2.0 } else { 1.0 } }
+$dwa = @(Get-DipWorkAreas $scaleOf $fakeScreens)
+Check '主屏按自己的 1.0 换算' ((Near $dwa[0].X 0) -and (Near $dwa[0].W 1920) -and (Near $dwa[0].Scale 1.0)) ('A=' + ($dwa[0] | ConvertTo-Json -Compress))
+Check '副屏按自己的 2.0 换算（物理 2560→DIP 1280）' ((Near $dwa[1].X 960) -and (Near $dwa[1].W 1280) -and (Near $dwa[1].Scale 2.0)) ('B=' + ($dwa[1] | ConvertTo-Json -Compress))
+Check '副屏 Y/Height 同样按 2.0 换算' ((Near $dwa[1].H 700)) ('H=' + $dwa[1].H)
+Check '分屏工作区保留 Primary 标记' (([bool]$dwa[0].Primary) -and (-not [bool]$dwa[1].Primary)) ('A=' + $dwa[0].Primary + ' B=' + $dwa[1].Primary)
+
+$rg1 = @(@{ X = 0; Y = 0; W = 1920; H = 1040; Primary = $true; Scale = 1.0 })
+$rg2 = @(@{ X = 0; Y = 0; W = 1920; H = 1040; Primary = $true; Scale = 1.5 })
+Check '分屏 DPI 变化 → 指纹变' ((Get-GeoKey $rg1 1.0 'auto') -ne (Get-GeoKey $rg2 1.0 'auto')) ('k1=' + (Get-GeoKey $rg1 1.0 'auto') + ' k2=' + (Get-GeoKey $rg2 1.0 'auto'))
+Check '无 Scale 字段时仍用传入比例（兼容旧数据）' ((Get-GeoKey $wa 1.25 'auto').StartsWith('1.25|auto|')) ('k=' + (Get-GeoKey $wa 1.25 'auto'))
+
 @{ checks = $checks; count = $checks.Count } | ConvertTo-Json -Depth 6 -Compress

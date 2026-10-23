@@ -17,15 +17,31 @@ function Get-DipScale {
   } catch { return 1.0 }
 }
 
-# 所有屏幕的工作区，换算成 DIP。返回 @{ X; Y; W; H } 数组
-function Get-DipWorkAreas {
-  $s = Get-DipScale
+# 单块显示器的 DPI（96/120/144...）换算成 px/DIP。0/异常一律按 100% 处理，并夹在
+# 0.5~4.0：混合 DPI 机器上 Win32 偶尔会给出 0 或离谱值，不能让它把整块 UI 缩没。
+function Get-DipScaleFromDpi($dpi) {
+  $v = [double]$dpi
+  if (-not ($v -gt 0)) { return 1.0 }
+  $s = $v / 96.0
+  if ($s -lt 0.5) { return 0.5 }
+  if ($s -gt 4.0) { return 4.0 }
+  return $s
+}
+
+# 所有屏幕的工作区，换算成 DIP。返回 @{ X; Y; W; H; Scale; Primary } 数组。
+# scaleOf 由调用方提供「这块屏的 px/DIP」；不传则退回主屏比例（单屏/旧系统行为不变）。
+# screens 只为测试注入：不传时走真实 Screen.AllScreens。
+function Get-DipWorkAreas($scaleOf = $null, $screens = $null) {
+  if (-not $screens) { $screens = [System.Windows.Forms.Screen]::AllScreens }
   $out = @()
-  foreach ($scr in [System.Windows.Forms.Screen]::AllScreens) {
+  foreach ($scr in @($screens)) {
     $b = $scr.WorkingArea
+    $s = if ($scaleOf) { [double](& $scaleOf $scr) } else { Get-DipScale }
+    if (-not ($s -gt 0)) { $s = 1.0 }
     $out += @{
       X = [double]$b.X / $s; Y = [double]$b.Y / $s
       W = [double]$b.Width / $s; H = [double]$b.Height / $s
+      Scale = $s
       Primary = [bool]$scr.Primary
     }
   }
@@ -142,7 +158,8 @@ function Get-SnapPos($rects, $x, $y, $w, $h, $snapPx, $disabled) {
 # 普通 tick 一律不动窗口位置（用户反馈「岛自己乱跑」的一个来源）。
 function Get-GeoKey($rects, $scale, $monitor) {
   $parts = foreach ($r in @($rects)) {
-    "$([double]$r.X)@$([double]$r.Y)@$([double]$r.W)@$([double]$r.H)@$([int]$r.Primary)"
+    $rs = if ($null -ne $r.Scale -and [double]$r.Scale -gt 0) { [double]$r.Scale } else { [double]$scale }
+    "$([double]$r.X)@$([double]$r.Y)@$([double]$r.W)@$([double]$r.H)@$([int]$r.Primary)@$rs"
   }
   return "$([double]$scale)|$monitor|" + ($parts -join ';')
 }

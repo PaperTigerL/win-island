@@ -44,8 +44,14 @@ results.push(run('node', [join(ROOT, 'test', 'replay-test.mjs'), '--expect', '21
   { expect: 21, label: '回放 21 条断言（窗口/上限/幂等 + 假通知库端到端，不碰真库）' }));
 results.push(run('node', [join(ROOT, 'test', 'single-instance-test.mjs'), '--expect', '9'],
   { expect: 9, label: '单实例 9 条断言（管道独占即退出码 7，不碰真库）' }));
-results.push(run('node', [join(ROOT, 'test', 'geometry-test.mjs'), '--expect', '22'],
-  { expect: 22, label: '几何/判定 22 条断言（游戏识别 + 拖拽吸附 + DPI 指纹，不启 WPF）' }));
+results.push(run('node', [join(ROOT, 'test', 'geometry-test.mjs'), '--expect', '33'],
+  { expect: 33, label: '几何/判定 33 条断言（游戏识别 + 拖拽吸附 + 分屏 DPI 换算/指纹，不启 WPF）' }));
+results.push(run('node', [join(ROOT, 'test', 'log-rotate-test.mjs'), '--expect', '10'],
+  { expect: 10, label: '运行期 capture.log 轮转 10 条断言（>5MB 改名 .1/哈希一致/只留一份）' }));
+results.push(run('node', [join(ROOT, 'test', 'panel-click-test.mjs'), '--expect', '7'],
+  { expect: 7, label: '面板空白点击 7 条断言（只认命中行，不用上次 SelectedItem 跳转）' }));
+results.push(run('node', [join(ROOT, 'test', 'state-throttle-test.mjs'), '--expect', '13'],
+  { expect: 13, label: 'Save-State 节流 13 条断言（纯到期判断 + 标脏/合并/退出落盘）' }));
 results.push(run('node', [join(ROOT, 'test', 'audio-contract-test.mjs'), '--expect', '15'],
   { expect: 15, label: '频谱契约 15 条断言（引擎函数/惰性编译/gameMode 暂停/audio.json/管道/配置，不碰声卡）' }));
 

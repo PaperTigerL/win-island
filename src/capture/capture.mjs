@@ -18,6 +18,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tickMeta } from '../schedule/meta.mjs';
 import { PIPE_NAME, startApi } from './api.mjs';
 import { normalizeReplayConfig, selectReplay } from './replay.mjs';
+import { rotateIfNeeded } from './log-rotate.mjs';
 
 const LAD = process.env.LOCALAPPDATA || process.env.TEMP;
 const DATA = process.env.WIN_ISLAND_HOME || join(LAD, 'win-island');
@@ -44,6 +45,7 @@ mkdirSync(DATA, { recursive: true });
 const log = s => {
   const line = `${new Date().toLocaleString('zh-CN', { hour12: false })} ${s}`;
   console.log(line);
+  rotateIfNeeded(LOG);
   try { appendFileSync(LOG, line + '\n'); } catch {}
 };
 

@@ -42,6 +42,7 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'activate-lib.ps1')
 . (Join-Path $PSScriptRoot 'prefs.ps1')
 . (Join-Path $PSScriptRoot 'geometry.ps1')
+. (Join-Path $PSScriptRoot 'state-throttle.ps1')
 . (Join-Path $PSScriptRoot 'queue.ps1')
 . (Join-Path $PSScriptRoot 'notify.ps1')
 . (Join-Path $PSScriptRoot 'audio.ps1')
@@ -702,7 +703,7 @@ function Place-Island {
   $w = Get-FootW
   $h = Get-IslandH
   $bar = Get-BarH
-  $rects = Get-DipWorkAreas
+  $rects = Get-DipWorkAreas { param($scr) Get-ScreenDpiScale $scr }
   $wa = Get-AnchorWorkArea $rects ([double]$script:win.Left + $w / 2) ([double]$script:win.Top + $bar / 2) `
                             ($p.monitor -eq 'primary')
   $a = [string]$p.anchor
@@ -1440,7 +1441,11 @@ function Load-State {
   } catch { '[island] 账本读坏了，按空账重来' | Write-Host }
 }
 
-function Save-State {
+$script:StateDirty = $false
+$script:StateDueAt = 0
+$script:StateDelayMs = 500   # P2-12：500ms 内的连续标记合并成一次落盘；最大延迟不超过一个 poll 周期 + 500ms
+
+function Save-StateNow {
   # id 是通知库的自增行号，比队列里最小行号还老的那些永远查不到了，直接丢。
   # 外部通知的 id 是 "notify:<原文>"，不是数字 —— 不能直接 [int64]，否则这一句会抛、整份账本写不出去。
   $keep = {
@@ -1462,6 +1467,22 @@ function Save-State {
     Set-Content -Path ($script:StateFile + '.tmp') -Value $body -Encoding UTF8
     Move-Item -Force ($script:StateFile + '.tmp') $script:StateFile
   } catch { "[island] 账本写失败：$($_.Exception.Message)" | Write-Host }
+}
+
+function Save-State {
+  # 只标脏；真正写盘由 tick 里的 Flush-State 合并，退出时 Add_Closed 无条件写一次。
+  $script:StateDirty = $true
+  if (-not $script:StateDueAt) {
+    $script:StateDueAt = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() + [int]$script:StateDelayMs
+  }
+}
+
+function Flush-State {
+  $nowMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+  if (-not (Test-StateFlushDue $script:StateDirty $script:StateDueAt $nowMs)) { return }
+  $script:StateDirty = $false
+  $script:StateDueAt = 0
+  Save-StateNow
 }
 
 function Get-Unread {
@@ -1882,8 +1903,41 @@ function Copy-All-Unread() {
 # ---------- 触发与拖拽：判定只看配置项，实现里不留数字 ----------
 # 光标位置换成 DIP：Win32 给的是物理像素，窗口的 Left/Top 是 DIP，
 # 125%/150% 缩放的机器上直接比会差出几百像素（hover 永远判不中）。
+# P1-11：比例按光标所在那块屏取，不再永远除主屏比例。
+function Get-ScreenDpiScale($scr) {
+  try {
+    $b = $scr.Bounds
+    $dpi = [IslandWin32]::MonitorDpiAt([int]($b.X + $b.Width / 2), [int]($b.Y + $b.Height / 2))
+    if ($dpi -gt 0) { return Get-DipScaleFromDpi $dpi }
+  } catch {}
+  return Get-DipScale
+}
+
+function Get-CursorDpiScale {
+  try {
+    $scr = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position)
+    if ($scr) { return Get-ScreenDpiScale $scr }
+  } catch {}
+  return Get-DipScale
+}
+
+function Get-WindowDpiScale {
+  # WPF 4.6.2+ 知道窗口当前所在显示器的 DPI；拿不到再问 Win32，最后回落主屏比例。
+  try {
+    $d = [System.Windows.Media.VisualTreeHelper]::GetDpi($script:win)
+    if ($d.DpiScaleX -gt 0) { return [double]$d.DpiScaleX }
+  } catch {}
+  try {
+    if ($script:hwnd -ne [IntPtr]::Zero) {
+      $dpi = [IslandWin32]::WindowDpi($script:hwnd)
+      if ($dpi -gt 0) { return Get-DipScaleFromDpi $dpi }
+    }
+  } catch {}
+  return Get-DipScale
+}
+
 function Get-CursorDip {
-  $s = Get-DipScale
+  $s = Get-CursorDpiScale
   return @{ X = [double][IslandWin32]::CursorX() / $s; Y = [double][IslandWin32]::CursorY() / $s }
 }
 
@@ -1960,7 +2014,7 @@ function Get-CurrentMonitor {
   try {
     $pt = [System.Windows.Forms.Cursor]::Position
     $scr = [System.Windows.Forms.Screen]::FromPoint($pt)
-    return @{ Id = [string]$scr.DeviceName; Dpi = [double](Get-DipScale) }
+    return @{ Id = [string]$scr.DeviceName; Dpi = [double](Get-ScreenDpiScale $scr) }
   } catch { return @{ Id = ''; Dpi = 1.0 } }
 }
 
@@ -1975,7 +2029,7 @@ function End-Press($c) {
     # Shift 按住 = 这次不吸附（临时，不写配置）；距离阈值是 snapPx，0 = 关闭吸附
     $shift = $false
     try { $shift = [IslandWin32]::ShiftDown() } catch {}
-    $snap = Get-SnapPos (Get-DipWorkAreas) ([double]$script:win.Left) ([double]$r.Y) (Get-FootW) (Get-BarH) ([double]$p.snapPx) $shift
+    $snap = Get-SnapPos (Get-DipWorkAreas { param($scr) Get-ScreenDpiScale $scr }) ([double]$script:win.Left) ([double]$r.Y) (Get-FootW) (Get-BarH) ([double]$p.snapPx) $shift
     $mi = Get-CurrentMonitor
     Set-PrefMany @{ anchor = 'free'; x = [int]$snap.X; y = [int]$snap.Y; monitorId = $mi.Id; monitorDpi = [double]$mi.Dpi }
     $how = if ($shift) { '，Shift 按住，这次不吸附' } elseif ($snap.Snapped) { "，吸附到 $($snap.Edges -join '+')" } else { '' }
@@ -2002,6 +2056,7 @@ $script:timer = New-Object System.Windows.Threading.DispatcherTimer
 $script:timer.Interval = [TimeSpan]::FromMilliseconds([int]$script:P.pollMs)
 $script:timer.Add_Tick({
   $script:tick++
+  Flush-State
   if ($script:HintUntil -and (Get-Date) -gt $script:HintUntil) {
     $script:HintUntil = $null
     $script:hintBox.Visibility = 'Collapsed'
@@ -2044,7 +2099,7 @@ $script:timer.Add_Tick({
     Sync-GameMode       # 游戏/无边框全屏检测 + 进出降载态（连续 2 次才切）
     # 显示器/DPI 变化才重算锚位：普通 tick 一律不动窗口位置（用户反馈「岛自己乱跑」的来源之一）。
     # 首拍只记指纹，不重复摆一次（启动时已经摆过）。
-    $geoKey = Get-GeoKey (Get-DipWorkAreas) (Get-DipScale) ([string]$script:P.monitor)
+    $geoKey = Get-GeoKey (Get-DipWorkAreas { param($scr) Get-ScreenDpiScale $scr }) (Get-WindowDpiScale) ([string]$script:P.monitor)
     if ($geoKey -ne $script:GeoKey) {
       $firstStamp = ($script:GeoKey -eq '')
       $script:GeoKey = $geoKey
@@ -2152,9 +2207,16 @@ $script:list.Add_MouseLeftButtonUp({
     if ($it) { Copy-Message $it.raw $false }
     return
   }
-  $sel = $script:list.SelectedItem
-  if (-not $sel) { return }
-  if (Open-Source $sel.raw) { Collapse-Panel } else { Refresh-Panel }
+  # P2-4：只认鼠标下真的命中的 ListBoxItem。点在列表空白/滚动条时，不能拿上一次
+  # SelectedItem 去跳来源应用 —— 那会让「点空白」变成「打开上次那行」。
+  $row = $null
+  try {
+    $pt = [System.Windows.Input.Mouse]::GetPosition($script:list)
+    $cit = $script:list.ItemContainerGenerator.ContainerFromPoint($pt)
+    if ($cit) { $row = $cit.DataContext }
+  } catch {}
+  if (-not $row) { return }
+  if (Open-Source $row.raw) { Collapse-Panel } else { Refresh-Panel }
 })
 $script:list.Add_MouseRightButtonUp({
   # 必须在这里截断冒泡：不截的话事件继续往上走到 $script:panel 的右键处理，那边会开 ctx，
@@ -2259,7 +2321,7 @@ $script:win.Add_SourceInitialized({
 # 窗口尺寸一变（展开面板、改缩放、换字体）就重算位置：底部/中间锚位全靠这一步才不跳
 $script:win.Add_SizeChanged({ Place-Island })
 $script:win.Add_Closed({
-  Save-State
+  Save-StateNow
   $script:timer.Stop(); $script:tray.Visible = $false; $script:app.Shutdown()
 })
 

@@ -43,6 +43,9 @@ public static class IslandWin32 {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out PT p);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(PT p);
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(PT p, uint flags);
+  [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr h, int type, out uint x, out uint y);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool join);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after,
@@ -75,6 +78,21 @@ public static class IslandWin32 {
   }
   public static int CursorX() { PT p; return GetCursorPos(out p) ? p.X : -32000; }
   public static int CursorY() { PT p; return GetCursorPos(out p) ? p.Y : -32000; }
+  // 目标显示器的有效 DPI（96/120/144...）。混合 DPI 下按光标/窗口所在那块屏取，而不是永远问主屏。
+  // Shcore 在 Win8.1+ 才有；老系统或调用失败返回 0，调用方回落到主屏比例。
+  public static uint MonitorDpiAt(int x, int y) {
+    try {
+      PT p; p.X = x; p.Y = y;
+      IntPtr h = MonitorFromPoint(p, 2); // MONITOR_DEFAULTTONEAREST
+      if (h == IntPtr.Zero) return 0;
+      uint dx, dy;
+      if (GetDpiForMonitor(h, 0, out dx, out dy) != 0) return 0; // MDT_EFFECTIVE_DPI
+      return dx;
+    } catch { return 0; }
+  }
+  public static uint WindowDpi(IntPtr h) {
+    try { return GetDpiForWindow(h); } catch { return 0; }
+  }
   // 左键现在是不是按着的。只能问 Win32：WPF 那侧 Mouse.PrimaryDevice 是 Win32MouseDevice，
   // .NET Framework 没有公开的 GetMouseState()（实测 MethodNotFound），而拖拽每 tick 都要问一次。
   [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vkey);
