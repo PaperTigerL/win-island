@@ -82,6 +82,20 @@ function Resolve-Anchor($anchor, $wa, $w, $h, $offX, $offY) {
   return @{ X = [double]$x + $offX; Y = [double]$y + $offY }
 }
 
+# 小条贴的是哪条屏幕边：'bottom' / 'top' / ''（悬空）。
+# 为什么只判上下：小条是横向的，左右贴边不改变形状。贴边判定要容差（默认 2 DIP）——
+# 吸附/缩放算出来的坐标带小数，差 1px 不该被当成悬空。
+# 这一项决定圆角、描边、内边距朝哪翻：以前只看「展开后会不会溢出」，于是吸附到屏幕底部、
+# 还没展开时小条仍是顶部样式（上平下圆 + 下沿描边），压在最下沿看起来像被裁掉一截。
+function Get-DockEdge($wa, $barY, $bar, $tol) {
+  $t = if ($null -ne $tol) { [double]$tol } else { 2.0 }
+  $top = [double]$wa.Y
+  $bottom = $top + [double]$wa.H
+  if (([double]$barY + [double]$bar) -ge ($bottom - $t)) { return 'bottom' }
+  if ([double]$barY -le ($top + $t)) { return 'top' }
+  return ''
+}
+
 # 「这个前台窗口算不算游戏/无边框全屏」的纯判断（2026-10-21 用户需求：游戏/全屏卡顿）。
 # 为什么放这里：判断只依赖矩形/标题栏/进程名，和 WPF 无关，能单测；取窗口、取屏幕留在 island.ps1。
 #   1) 必须覆盖**整块显示器**（比 Bounds 而不是 WorkingArea —— 真全屏游戏会盖住任务栏）；

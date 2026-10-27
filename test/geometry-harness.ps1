@@ -53,6 +53,16 @@ Check 'Shift（disabled）关闭吸附' ((-not $s8.Snapped) -and (Near $s8.X 5))
 $waNeg = @(@{ X = -1920; Y = 0; W = 1920; H = 1040; Primary = $false }, @{ X = 0; Y = 0; W = 1920; H = 1040; Primary = $true })
 $s9 = Get-SnapPos $waNeg (-1917) 100 470 30 10 $false
 Check '副屏（负坐标）左沿也能吸附' ((Near $s9.X (-1920)) -and ($s9.Edges -contains 'left')) ('X=' + $s9.X + ' edges=' + ($s9.Edges -join ','))
+
+# ---------- 贴边判定（Get-DockEdge）：圆角/描边/内边距朝哪翻靠它 ----------
+$dw = @{ X = 0; Y = 0; W = 1920; H = 1080; Primary = $true }
+Check '底边正好压在工作区下沿 = 贴底' ((Get-DockEdge $dw 1048 32 2) -eq 'bottom') ('dock=' + (Get-DockEdge $dw 1048 32 2))
+Check '离底 1 DIP（容差内）= 贴底' ((Get-DockEdge $dw 1047 32 2) -eq 'bottom') ('dock=' + (Get-DockEdge $dw 1047 32 2))
+Check '离底 3 DIP = 悬空' ((Get-DockEdge $dw 1045 32 2) -eq '') ('dock=' + (Get-DockEdge $dw 1045 32 2))
+Check '贴着工作区上沿 = 贴顶' ((Get-DockEdge $dw 0 32 2) -eq 'top') ('dock=' + (Get-DockEdge $dw 0 32 2))
+Check '离上沿 1 DIP（容差内）= 贴顶' ((Get-DockEdge $dw 1 32 2) -eq 'top') ('dock=' + (Get-DockEdge $dw 1 32 2))
+Check '屏幕中间 = 悬空' ((Get-DockEdge $dw 500 32 2) -eq '') ('dock=' + (Get-DockEdge $dw 500 32 2))
+Check '副屏（负坐标）贴底也认' ((Get-DockEdge @{ X = -1920; Y = 0; W = 1920; H = 1080 } 1048 32 2) -eq 'bottom') ('dock=' + (Get-DockEdge @{ X = -1920; Y = 0; W = 1920; H = 1080 } 1048 32 2))
 $k1 = Get-GeoKey $wa 1.0 'auto'
 $k2 = Get-GeoKey @(@{ X = 0; Y = 0; W = 1600; H = 860; Primary = $true }) 1.0 'auto'
 Check '显示器尺寸变了 → 指纹变' ($k1 -ne $k2) ('k1=' + $k1 + ' k2=' + $k2)

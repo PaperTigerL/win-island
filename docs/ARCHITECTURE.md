@@ -78,6 +78,10 @@ hidden = fullscreen=hide 时整条不出现
 - **`SizeToContent=Height`**：面板一展开窗口高度从 ~34 变成几百，所以底部锚位钉的是**下沿**而不是上沿，
   否则展开瞬间整块往下跳。向上生长靠 `Set-StackUp` 重排 `root.Children`
   —— .NET Framework 的 WPF **没有** `StackPanel.Direction` 这个公开属性（实测），别再找。
+- **贴边形状**：`Get-DockEdge` 按小条实际位置判贴顶 / 贴底 / 悬空（容差 2 DIP），`Set-BarDock`
+  把圆角、描边、内边距一起翻 —— 贴顶是上平下圆、贴底是上圆下平、悬空四角全圆。只看「展开后
+  会不会溢出」不够：吸附到底部还没展开时，小条会顶着顶部样式压在最下沿，看起来像被裁掉一截。
+  贴边时坐标钉死在沿上，浮点误差留出的半像素不会把圆角送进屏幕外。
 - **点击穿透**：`clickThrough=true` 时常驻态带 `WS_EX_TRANSPARENT`，不吞底下窗口的点击；
   光标压上小条的那一段时间自动摘掉，所以拖拽和滚轮仍然可用。判断按键状态用 Win32
   `GetAsyncKeyState(VK_LBUTTON)`（`IslandWin32::LeftDown()`）—— WPF 这边

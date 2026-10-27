@@ -44,8 +44,8 @@ results.push(run('node', [join(ROOT, 'test', 'replay-test.mjs'), '--expect', '21
   { expect: 21, label: '回放 21 条断言（窗口/上限/幂等 + 假通知库端到端，不碰真库）' }));
 results.push(run('node', [join(ROOT, 'test', 'single-instance-test.mjs'), '--expect', '9'],
   { expect: 9, label: '单实例 9 条断言（管道独占即退出码 7，不碰真库）' }));
-results.push(run('node', [join(ROOT, 'test', 'geometry-test.mjs'), '--expect', '33'],
-  { expect: 33, label: '几何/判定 33 条断言（游戏识别 + 拖拽吸附 + 分屏 DPI 换算/指纹，不启 WPF）' }));
+results.push(run('node', [join(ROOT, 'test', 'geometry-test.mjs'), '--expect', '40'],
+  { expect: 40, label: '几何/判定 40 条断言（游戏识别 + 拖拽吸附 + 贴边判定 + 分屏 DPI 换算/指纹，不启 WPF）' }));
 results.push(run('node', [join(ROOT, 'test', 'log-rotate-test.mjs'), '--expect', '10'],
   { expect: 10, label: '运行期 capture.log 轮转 10 条断言（>5MB 改名 .1/哈希一致/只留一份）' }));
 results.push(run('node', [join(ROOT, 'test', 'panel-click-test.mjs'), '--expect', '7'],

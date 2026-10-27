@@ -681,6 +681,42 @@ function Get-IslandH {
   return $h
 }
 
+# 胶囊/面板与常驻小条的间距：往下长时挂在上沿，往上长时挂在下沿。
+# 不跟着翻的话，底部锚位展开时卡片会紧贴时钟条，空档却留在窗口最上面。
+function Set-CardGap {
+  $gap = [double]$script:P.topGap
+  $t = if ($script:StackUp) { 0 } else { $gap }
+  $b = if ($script:StackUp) { $gap } else { 0 }
+  $script:pill.Margin = New-Object System.Windows.Thickness(0, $t, 0, $b)
+  $script:panel.Margin = New-Object System.Windows.Thickness(0, $t, 0, $b)
+}
+
+# 小条贴边时的形状：贴顶 = 上平下圆，贴底 = 上圆下平，悬空 = 四角全圆。
+# 内边距和描边要跟着圆角一起翻 —— 只翻圆角的话，贴底时字仍偏上、描边仍画在最下沿。
+# 三种档的竖直总高保持一致（内边距 + 描边 = 9 DIP），翻转时小条不会突然长高 1px。
+function Set-BarDock($dock) {
+  switch ($dock) {
+    'bottom' {
+      $script:clock.CornerRadius = '15,15,0,0'
+      $script:clock.BorderThickness = '1,1,1,0'
+      $script:clock.Padding = '13,5,13,3'
+      $script:handle.CornerRadius = '7,7,0,0'
+    }
+    'top' {
+      $script:clock.CornerRadius = '0,0,15,15'
+      $script:clock.BorderThickness = '1,0,1,1'
+      $script:clock.Padding = '13,3,13,5'
+      $script:handle.CornerRadius = '0,0,7,7'
+    }
+    default {
+      $script:clock.CornerRadius = '15'
+      $script:clock.BorderThickness = '1'
+      $script:clock.Padding = '13,4,13,4'
+      $script:handle.CornerRadius = '7'
+    }
+  }
+}
+
 # 面板往上长还是往下长。.NET Framework 的 StackPanel 没有公开的 Direction（反射查过，
 # 只有 .NET Core 的 WPF 有），所以「往上长」靠换子元素顺序：小条排在最后一个，它就贴在窗口下沿。
 # 顺序变了等于重新挂一遍视觉树，所以只在真的翻转时才动手，用 $script:StackUp 记住当前态。
@@ -692,6 +728,7 @@ function Set-StackUp($up) {
   $script:root.Children.Clear()
   foreach ($c in $order) { $script:root.Children.Add($c) }
   $script:StackUp = $up
+  Set-CardGap
 }
 
 function Place-Island {
@@ -726,8 +763,13 @@ function Place-Island {
     $barX = $bx + [double]$p.offset
     $barY = $by + [double]$p.offsetY
   }
+  # 贴的是哪条边：贴边时形状/描边/内边距要翻过来（见 Set-BarDock），面板也只能往屏幕里长。
+  # 贴着边就把坐标钉死在沿上：浮点误差留出的半像素会把下圆角/描边送到屏幕外面去。
+  $dock = Get-DockEdge $wa $barY $bar 2
+  if ($dock -eq 'bottom') { $barY = [double]$wa.Y + [double]$wa.H - $bar }
+  elseif ($dock -eq 'top') { $barY = [double]$wa.Y }
   # 面板往哪边长：下面放不下就整块往上长（底部锚位天然如此）
-  $up = ($a -like 'bottom-*') -or (($barY + $h) -gt ([double]$wa.Y + $wa.H + 1))
+  $up = ($a -like 'bottom-*') -or ($dock -eq 'bottom') -or (($barY + $h) -gt ([double]$wa.Y + [double]$wa.H + 1))
   $winY = if ($up) { $barY + $bar - $h } else { $barY }
   if (-not (Test-OnAnyScreen $rects $barX $winY $w $h)) {
     # 显示器被拔掉 / 分辨率改小，保存的位置已经不在任何屏上：回落顶部居中，别把岛弄丢
@@ -737,12 +779,12 @@ function Place-Island {
     $barY = [double]$wa.Y
     $winY = $barY
     $up = $false
+    $dock = 'top'
   }
   # 面板往上长还是往下长：.NET Framework 的 StackPanel 没有公开的 Direction（.NET Core 才有），
   # 所以「往上长」靠换子元素顺序实现 —— 小条排最后一个时它就在窗口下沿。
   Set-StackUp $up
-  $script:clock.CornerRadius = if ($up) { '15,15,0,0' } else { '0,0,15,15' }
-  $script:handle.CornerRadius = if ($up) { '7,7,0,0' } else { '0,0,7,7' }
+  Set-BarDock $dock
   if ([Math]::Abs([double]$script:win.Width - $w) -gt 0.5) { $script:win.Width = $w }
   if ([Math]::Abs([double]$script:win.Left - $barX) -gt 0.5) { $script:win.Left = $barX }
   if ([Math]::Abs([double]$script:win.Top - $winY) -gt 0.5) { $script:win.Top = $winY }
@@ -1212,12 +1254,10 @@ function Update-Prefs {
 
 # topGap 在 XAML 里是启动时插值进 pill/panel 的 Margin 的；热加载只重新定位是改不动它的
 # （审计 P2-1：改完 topGap 必须重启才看到间距）。这里按生效值重设 Margin —— XAML 里的插值
-# 只管「首次启动」，之后一律由这个函数说了算。Margin 变了窗口高度跟着变，SizeChanged 会再
-# 触发 Place-Island，所以这里只改样式、不手动摆位置。
+# 只管「首次启动」，之后一律由 Set-CardGap 说了算（它还要按上下方向决定间距挂在哪一边）。
+# Margin 变了窗口高度跟着变，SizeChanged 会再触发 Place-Island，所以这里只改样式、不手动摆位置。
 function Update-TopGap {
-  $gap = [double]$script:P.topGap
-  $script:pill.Margin = New-Object System.Windows.Thickness(0, $gap, 0, 0)
-  $script:panel.Margin = New-Object System.Windows.Thickness(0, $gap, 0, 0)
+  Set-CardGap
 }
 
 function Apply-Prefs($diff) {
